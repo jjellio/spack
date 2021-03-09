@@ -62,6 +62,7 @@ class Seacas(CMakePackage):
 
     variant('thread_safe',  default=False,
             description='Enable thread-safe exodus and IOSS libraries')
+    variant('ninja', default=False, description='Enables the Ninja build system')
 
     # TPLs (alphabet order)
     variant('adios2',         default=False,
@@ -82,18 +83,20 @@ class Seacas(CMakePackage):
     depends_on('netcdf-c@4.6.2:+mpi+parallel-netcdf', when='+mpi')
     depends_on('netcdf-c@4.6.2:~mpi', when='~mpi')
     depends_on('hdf5+hl~mpi', when='~mpi')
+    depends_on('hdf5+fortran', when='+fortran')
     depends_on('cgns@develop+mpi+scoping', when='+cgns +mpi')
     depends_on('cgns@develop~mpi+scoping', when='+cgns ~mpi')
     depends_on('adios2@develop~mpi', when='+adios2 ~mpi')
     depends_on('adios2@develop+mpi', when='+adios2 +mpi')
     depends_on('matio', when='+matio')
     depends_on('metis+int64+real64', when='+metis ~mpi')
-    depends_on('parmetis+int64+real64', when='+metis +mpi')
+    depends_on('parmetis+int64', when='+metis +mpi')
 
     # MPI related dependencies
     depends_on('mpi', when='+mpi')
 
-    depends_on('cmake@3.1:', type='build')
+    depends_on('cmake@3.1:',     type='build')
+    depends_on('ninja@kitware:', type='build', when='+ninja')
 
     def cmake_args(self):
         spec = self.spec
@@ -274,3 +277,19 @@ class Seacas(CMakePackage):
                            self.prefix.lib)
 
         return options
+
+    @property
+    def std_cmake_args(self):
+        """This allows the Ninja generator to be set based on the spec
+        :return: standard cmake arguments
+        """
+        # standard CMake arguments
+        if "+ninja" in self.spec:
+            CMakePackage.generator="Ninja"
+
+        std_cmake_args = CMakePackage._std_args(self)
+
+        std_cmake_args += getattr(self, 'cmake_flag_args', [])
+        return std_cmake_args
+
+

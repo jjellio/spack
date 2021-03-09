@@ -16,7 +16,7 @@ class Cgns(CMakePackage):
     url      = "https://github.com/CGNS/CGNS/archive/v3.3.0.tar.gz"
     git      = "https://github.com/CGNS/CGNS"
 
-    parallel = False
+    parallel = True
 
     version('develop', branch='develop')
     version('master',  branch='master')
@@ -41,12 +41,19 @@ class Cgns(CMakePackage):
     variant('parallel',   default=False, description='Enable parallel features')
     variant('mem_debug',  default=False, description='Enable memory debugging option')
 
+    variant('ninja',      default=False, description='Enable Ninja build system')
+    depends_on('cmake@3.19:',    type='build')
+    depends_on('ninja@kitware:', type='build', when='+ninja')
+    conflicts('+ninja', when='+fortran')
+
     depends_on('hdf5~mpi', when='+hdf5~mpi')
     depends_on('hdf5+mpi', when='+hdf5+mpi')
+    depends_on('hdf5+fortran', when='+fortran')
     depends_on('mpi', when='+mpi')
 
     def cmake_args(self):
         spec = self.spec
+
         options = []
 
         options.extend([
@@ -107,3 +114,20 @@ class Cgns(CMakePackage):
                 ])
 
         return options
+
+    @property
+    def std_cmake_args(self):
+        """This allows the Ninja generator to be set based on the spec
+        :return: standard cmake arguments
+        """
+        # standard CMake arguments
+        if "+ninja" in self.spec:
+            print("\n\n       ----    Enabling Ninja    ----    \n\n")
+            CMakePackage.generator="Ninja"
+
+        std_cmake_args = CMakePackage._std_args(self)
+
+        std_cmake_args += getattr(self, 'cmake_flag_args', [])
+        return std_cmake_args
+
+

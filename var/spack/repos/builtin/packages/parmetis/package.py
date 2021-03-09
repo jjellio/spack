@@ -23,8 +23,10 @@ class Parmetis(CMakePackage):
     variant('shared', default=True, description='Enables the build of shared libraries.')
     variant('gdb', default=False, description='Enables gdb support.')
     variant('int64', default=False, description='Sets the bit width of METIS\'s index type to 64.')
+    variant('ninja', default=False, description='Uses Ninja build system')
 
-    depends_on('cmake@2.8:', type='build')
+    depends_on('cmake@2.8:',     type='build')
+    depends_on('ninja@kitware:', type='build', when='+ninja')
     depends_on('mpi')
     depends_on('metis@5:')
     depends_on('metis+int64', when='+int64')
@@ -78,6 +80,21 @@ class Parmetis(CMakePackage):
             options.append('-DGDB:BOOL=ON')
 
         return options
+
+    @property
+    def std_cmake_args(self):
+        """This allows the Ninja generator to be set based on the spec
+        :return: standard cmake arguments
+        """
+        # standard CMake arguments
+        if "+ninja" in self.spec:
+            CMakePackage.generator="Ninja"
+
+        std_cmake_args = CMakePackage._std_args(self)
+
+        std_cmake_args += getattr(self, 'cmake_flag_args', [])
+        return std_cmake_args
+
 
     @run_after('install')
     def darwin_fix(self):
