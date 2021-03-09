@@ -39,6 +39,10 @@ class Parmetis(CMakePackage):
     # https://bitbucket.org/petsc/pkg-parmetis/commits/82409d68aa1d6cbc70740d0f35024aae17f7d5cb/raw/  # NOQA: E501
     patch('pkg-parmetis-82409d68aa1d6cbc70740d0f35024aae17f7d5cb.patch')
 
+    patch('parmetis-enable-shared-and-static.patch',
+          sha256='7be1563dcde9b2d19e8a51d7908a2db6babe425124fc9f2d25df6b80c91df97f',
+          when='@4.0.3')
+
     def flag_handler(self, name, flags):
         if name == 'cflags':
             if '%pgi' in self.spec:
