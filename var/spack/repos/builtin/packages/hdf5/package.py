@@ -430,3 +430,26 @@ HDF5 version {version} {version}
 
         # Run existing install check
         self._check_install()
+
+    @run_after('build')
+    def vet_the_build(self):
+        import os
+        # h5_test fails when run in parallel
+        print('\n\n-------------------- ++++++++++++ --------------------- \n\n')
+        print('\n\nRunning make check!\n\n')
+        os.system('module list')
+        os.system('which srun')
+        os.system('srun -n6 --cpu-bind=cores,v hostname')
+        print('\n\n-------------------- ++++++++++++ --------------------- \n\n')
+        make('check-s', '-ik', parallel=True)
+        make('check-p', '-ik', parallel=False)
+        make('check', '-ik', parallel=False)
+
+    def setup_environment(self, spack_env, run_env):
+        import os
+        # export RUNSERIAL="srun --cpu-bind=cores -c2 -n  1"
+        # export RUNPARALLEL="srun --cpu-bind=cores -c2 -n  6"
+        spack_env.set('RUNSERIAL',   'srun --cpu-bind=cores -c2 -n 1')
+        spack_env.set('RUNPARALLEL', 'srun --cpu-bind=cores -c2 -n 6')
+        # if we know that the build is on one node, then we can do file io out of /tmp (or some non-parallel fs)
+        #spack_env.set('HDF5_PARAPREFIX', '{pref}/.hdf5_parprefix'.format(pref=os.environ.get('HOME', '/tmp')))
