@@ -587,7 +587,7 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
 		txt=f'''
 			# this is an internal variable that enables the libraries common to both
 			# sparc and empire ... it's name predates empire using it
-		  export ATDM_CONFIG_ENABLE_SPARC_SETTINGS=ON
+			export ATDM_CONFIG_ENABLE_SPARC_SETTINGS=ON
 
 			# override the hostnames used... hopefully this helps cdash work
 			export ATDM_CONFIG_KNOWN_HOSTNAME={ci_hostname}
@@ -599,18 +599,18 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
 
 			#Not sure if we need these... they may get auto set
 			# they are set in ats2
-		  # ATDM Settings
+			# ATDM Settings
 			export ATDM_CONFIG_CUDA_RDC="OFF"
-		  export ATDM_CONFIG_USE_CUDA=OFF
-		  export ATDM_CONFIG_USE_OPENMP=OFF
-		  export ATDM_CONFIG_USE_PTHREADS=OFF
-		  export ATDM_CONFIG_CTEST_PARALLEL_LEVEL=4
+			export ATDM_CONFIG_USE_CUDA=OFF
+			export ATDM_CONFIG_USE_OPENMP=OFF
+			export ATDM_CONFIG_USE_PTHREADS=OFF
+			export ATDM_CONFIG_CTEST_PARALLEL_LEVEL=4
 			export ATDM_CONFIG_BUILD_COUNT=60
 			export ATDM_CONFIG_FPIC="OFF"
 
-		  # Kokkos Settings
-		  export ATDM_CONFIG_Kokkos_ENABLE_SERIAL=ON
-		  #export KOKKOS_NUM_DEVICES=4
+			# Kokkos Settings
+			export ATDM_CONFIG_Kokkos_ENABLE_SERIAL=ON
+			#export KOKKOS_NUM_DEVICES=4
 
 			# Set common MPI wrappers
 			export MPICC="{mpicc}"
