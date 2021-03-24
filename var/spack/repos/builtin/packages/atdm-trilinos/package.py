@@ -85,10 +85,10 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
 
 	# adding this is causing a the package to depend on the default libsci spec
 	# which will the conflict the exec_space=openmp variant
-	#depends_on('blas',
-	#		type=('build', 'link', 'run'))
-	#depends_on('lapack',
-	#		type=('build', 'link', 'run'))
+	depends_on('blas',
+			type=('build', 'link', 'run'))
+	depends_on('lapack',
+			type=('build', 'link', 'run'))
 	depends_on('mpi',
 			type=('build', 'link', 'run'))
 
@@ -132,9 +132,12 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
 			)
 
 	print('superlu-dist@6.4.0~ipo~int64+shared')
-	depends_on('superlu-dist@6.4.0~ipo~int64+shared+openmp^cray-libsci+openmp',
+	depends_on('superlu-dist@6.4.0~ipo~int64+shared+openmp',
 			type=('build', 'link', 'run'),
 			when='exec_space=openmp host_lapack=libsci')
+	#depends_on('superlu-dist@6.4.0~ipo~int64+shared+openmp^cray-libsci+openmp',
+	#		type=('build', 'link', 'run'),
+	#		when='exec_space=openmp host_lapack=libsci')
 
 	depends_on('superlu-dist@6.4.0~ipo~int64+shared~openmp',
 			type=('build', 'link', 'run'),
@@ -147,13 +150,13 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
 
 	depends_on('python@3:', type=('build', 'link', 'run'))
 
-	depends_on('rocm',
-			type=('build', 'link', 'run'),
-			when='exec_space=rocm')
+	#depends_on('rocm',
+	#		type=('build', 'link', 'run'),
+	#		when='exec_space=rocm')
 
-	depends_on('cuda',
-			type=('build', 'link', 'run'),
-			when='exec_space=cuda')
+	#depends_on('cuda',
+	#		type=('build', 'link', 'run'),
+	#		when='exec_space=cuda')
 
 	print("done")
 
