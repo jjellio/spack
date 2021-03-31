@@ -16,6 +16,11 @@ import re
 import shlex
 import subprocess
 
+# This pacakge requires the clingo concretizer in spack
+# to enable it,  spack config add "config:concretizer:clingo"
+# it requires a GCC to install.
+# see spack issue https://github.com/spack/spack/issues/22463
+
 class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
 	"""The Trilinos Project is an effort to develop algorithms and enabling
 	technologies within an object-oriented software framework for the solution
@@ -25,7 +30,7 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
 	homepage = "https://trilinos.org/"
 	git		 = "https://github.com/trilinos/Trilinos.git"
 
-	maintainers = ['keitat']
+	maintainers = ['jjellio']
 
 	# ###################### Versions ##########################
 
@@ -33,6 +38,77 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
 	version('master', branch='master')
 	version('13.0.1',
 			sha256='0bce7066c27e83085bc189bf524e535e5225636c9ee4b16291a38849d6c2216d')
+
+	# ###################### Variants ###########################
+	variant('ninja',
+			default=True,
+			description='Uses Ninja build system')
+	# whether trilinos should build shared or static libraries
+	variant('shared',
+			default=False,
+			description='Build shared libraries')
+	variant('tpls_shared',
+			default=False,
+			description='Use shared libraries for TPLs')
+	# seems this should be implied ... if shared = true, else false
+	variant('pic',
+			default=False,
+			description='Build with position independent code (-fpic)')
+
+	# sparc and/or empire packages
+	variant('sparc',	default=False,
+			description='Enable the packages SPARC uses')
+	variant('empire', default=True,
+			description='Enable the packages EMPIRE uses')
+
+	# enable complex scalars
+	variant('complex', default=False)
+	# used with the CI work... will post results as coming from
+	# hostname = ci_hostname, this is needed if you build on a node
+	# (as you should!)
+	variant('ci_hostname',
+			multi=False,
+			default='redwood')
+
+
+	# control the execution space used
+	# for now this is a single value variant
+	# it's possible we may use multiple in the future
+	# in general, if you enable openmp/cuda/rocm you always get serial as well
+	variant('exec_space', default='serial',
+			values=('serial',
+				'openmp',
+				'cuda',
+				'rocm'),
+			description='the execution space to build')
+
+	# specify the host side blas/lapack (it assumes they are the same)
+	variant('host_lapack', default='libsci',
+			values=('libsci','openblas'),
+			description='the host blas/lapack to use')
+
+	# adding this is causing a the package to depend on the default libsci spec
+	# which will the conflict the exec_space=openmp variant
+	depends_on('mpi',
+			type=('build','link','run'))
+	depends_on('blas',
+			type=('build', 'link', 'run'))
+	depends_on('lapack',
+			type=('build', 'link', 'run'))
+
+	# we need cmake at +3.19.x for CCE support
+	depends_on('cmake@3.19:')
+	# my cmake package has a +ninja... maybe that should get committed upstream
+	depends_on('ninja@kitware', when='+ninja')
+
+	# ###################### Host Lapack/Blas ##################
+	depends_on('cray-libsci~mpi+shared+openmp',
+			type=('build', 'link', 'run'),
+			when='host_lapack=libsci exec_space=openmp')
+
+	depends_on('cray-libsci~mpi+shared~openmp',
+			type=('build', 'link', 'run'),
+			when='exec_space=serial host_lapack=libsci')
 
 	# ###################### Variants ##########################
 	##	netcdf-c:
@@ -54,136 +130,85 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
 	##		variants: ~gdb~ipo~int64+ninja+shared  build_type=RelWithDebInfo
 	##	metis:
 	##		variants: ~gdb+real64~int64+shared	build_type=RelWithDebInfo
-	variant('complex', default=False)
 
-	variant('ci_hostname',
-			multi=False,
-			default='redwood')
 
-	variant('sparc',	default=False,
-			description='Enable the packages SPARC uses')
-	variant('empire', default=True,
-			description='Enable the packages EMPIRE uses')
+	tpl_variant_map = {
+			'netcdf-c' : {
+				'version' : '',
+				'variant' : '~hdf4~jna+mpi+parallel-netcdf+dap'
+				},
+			'hdf5' : {
+				'version' : '@1.10.7',
+				'variant' : '~cxx~debug~threadsafe~java+fortran+hl+mpi+szip'
+				},
+			'parallel-netcdf': {
+				'version' : '',
+				'variant' : '~cxx~burstbuffer+fortran'
+				},
+			'parmetis' : {
+				'version' : '@4.0.3',
+				'variant' : '~gdb~ipo~int64+ninja build_type=Release'
+				},
+			'metis' : {
+				'version' : '@5:',
+				'variant' : '~gdb+real64~int64 build_type=Release'
+				},
+			'cgns' : {
+				'version' : '',
+				'variant' : '~base_scope~int64~ipo~legacy~mem_debug~fortran+hdf5+mpi+parallel+scoping+static+ninja build_type=Release'
+				},
+			'boost' : {
+				'version' : '',
+				'variant' : '+system+icu cxxstd=11'
+				},
+			'superlu-dist' : {
+				'version' : '@6.4.0',
+				'variant' : '~ipo~int64 build_type=Release'
+				},
+			'python' : {
+				'version' : '@3:',
+				'variant' : ''
+				},
+			'perl' : {
+				'version' : '',
+				'variant' : ''
+				}
+			}
 
-	variant('shared', default=True)
+	tty.msg(f'Determining Trilinos requirements for third party libraries (tpls)')
+	for tpl,tpl_config in tpl_variant_map.items():
+		vers = tpl_config["version"]
+		opts = tpl_config['variant']
+		tty.msg(f'{tpl} : version = {vers if vers else "any"}')
+		tty.msg(f'      : variant = {opts}')
+		depends_on(f'{tpl}{vers}{opts}',
+				type=('build', 'link', 'run'))
+		if tpl not in [ 'cgns' ]:
+			depends_on(f'{tpl}+shared')
 
-	variant('exec_space', default='serial',
-			values=('serial',
-				'openmp',
-				'cuda',
-				'rocm'),
-			description='the execution space to build')
-
-	variant('host_lapack', default='libsci',
-			values=('libsci','openblas'),
-			description='the host blas/lapack to use')
-
-	variant('ninja', default=True, description='Uses Ninja build system')
-	variant('trace_cmake', default=False,
-			description='-traces cmake, produces substantial output '\
-					'- for debugging cmake issues only')
-
-	# adding this is causing a the package to depend on the default libsci spec
-	# which will the conflict the exec_space=openmp variant
-	depends_on('blas',
-			type=('build', 'link', 'run'))
-	depends_on('lapack',
-			type=('build', 'link', 'run'))
-	depends_on('mpi',
-			type=('build', 'link', 'run'))
-
-	depends_on('cmake@3.19:')
-	depends_on('ninja@kitware', when='+ninja')
-
-	# I think this needs to be early... before any child can require it
-	# exec_space=openmp host_lapack=libsci
-
-	depends_on('cray-libsci~mpi+shared+openmp',
+	# this depends on concretizer = clingo
+	# with that new concretizer, spack will realize that we have declared
+	# a lapack/blas provider (in libsci), and then enforce that dependencies
+	# use the declared provider (and spec).
+	depends_on('superlu-dist+openmp',
 			type=('build', 'link', 'run'),
-			when='host_lapack=libsci exec_space=openmp')
-
-	depends_on('cray-libsci~mpi+shared~openmp',
+			when='exec_space=openmp')
+	depends_on('superlu-dist~openmp',
 			type=('build', 'link', 'run'),
-			when='exec_space=serial host_lapack=libsci')
-
-	print('hdf5@1.10.7~cxx~debug~threadsafe~java+fortran+hl+mpi+pic+shared+szip');
-	depends_on('hdf5@1.10.7~cxx~debug~threadsafe~java+fortran+hl+mpi+pic+shared+szip',
-			type=('build', 'link', 'run'),
-			)
-	print('netcdf-c@4.7.0:4.7.99~hdf4~jna+mpi+parallel-netcdf+dap+pic+shared');
-	depends_on('netcdf-c@4.7.0:4.7.99~hdf4~jna+mpi+parallel-netcdf+dap+pic+shared',
-			type=('build', 'link', 'run'),
-			)
-	print('parallel-netcdf~cxx~burstbuffer+fortran+pic+shared');
-	depends_on('parallel-netcdf~cxx~burstbuffer+fortran+pic+shared',
-			type=('build', 'link', 'run'),
-			)
-	print('parmetis@4.0.3~gdb~ipo~int64+ninja+shared');
-	depends_on('parmetis@4.0.3~gdb~ipo~int64+ninja+shared',
-			type=('build', 'link', 'run'),
-			)
-	print('metis@5:~gdb+real64~int64~shared');
-	depends_on('metis@5:~gdb+real64~int64~shared',
-			type=('build', 'link', 'run'),
-			)
-	print('cgns~base_scope~int64~ipo~legacy~mem_debug~fortran+hdf5+mpi+parallel+scoping+static+ninja');
-	depends_on('cgns~base_scope~int64~ipo~legacy~mem_debug~fortran+hdf5+mpi+parallel+scoping+static+ninja',
-			type=('build', 'link', 'run'),
-			)
-
-	print('superlu-dist@6.4.0~ipo~int64+shared')
-	depends_on('superlu-dist@6.4.0~ipo~int64+shared+openmp',
-			type=('build', 'link', 'run'),
-			when='exec_space=openmp host_lapack=libsci')
+			when='exec_space=serial')
+	# without clingo, I tried this... which caused the conretizer to go into an
+	# infinite loop
 	#depends_on('superlu-dist@6.4.0~ipo~int64+shared+openmp^cray-libsci+openmp',
 	#		type=('build', 'link', 'run'),
 	#		when='exec_space=openmp host_lapack=libsci')
-
-	depends_on('superlu-dist@6.4.0~ipo~int64+shared~openmp',
-			type=('build', 'link', 'run'),
-			when='exec_space=serial')
-
-	print('boost+shared+pic+system+icu cxxstd=11');
-	depends_on('boost+shared+pic+system+icu cxxstd=11',
-			type=('build', 'link', 'run'),
-			)
-
-	depends_on('python@3:', type=('build', 'link', 'run'))
-
-	#depends_on('rocm',
+	#depends_on('superlu-dist@6.4.0~ipo~int64+shared~openmp^cray-libsci~openmp',
 	#		type=('build', 'link', 'run'),
-	#		when='exec_space=rocm')
-
-	#depends_on('cuda',
-	#		type=('build', 'link', 'run'),
-	#		when='exec_space=cuda')
+	#		when='exec_space=serial host_lapack=libsci')
 
 	print("done")
 
 
 	def url_for_version(self, version):
-		try:
-			print('self.compiler')
-			pprint(self.compiler)
-			print('self.compiler.to_dict()')
-			pprint(self.compiler.to_dict())
-		except:
-			pass
-
-		try:
-			print('self.compiler.modules')
-			pprint(self.compiler.modules)
-			print('self.compiler.modules.to_dict')
-			pprint(self.compiler.modules.to_dict())
-		except:
-			pass
-		try:
-			print('self.compiler.cxx')
-			pprint(self.compiler.cxx)
-			print('self.compiler.cxx.to_dict')
-			pprint(self.compiler.cxx.to_dict())
-		except:
-			pass
 		url = "https://github.com/trilinos/Trilinos/archive/trilinos-release-{0}.tar.gz"
 		return url.format(version.dashed)
 
@@ -215,11 +240,12 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
 			#define('Trilinos_EXTRAREPOS_FILE', ''),
 			#define('Trilinos_IGNORE_MISSING_EXTRA_REPOSITORIES', True),
 			#define('Trilinos_ENABLE_KNOWN_EXTERNAL_REPOS_TYPE', 'None'),
-			#define('Trilinos_ENABLE_ALL_PACKAGES', True),
+			define('Trilinos_ENABLE_ALL_PACKAGES', True),
 			define('Trilinos_TRACE_ADD_TEST', True),
 			define('Trilinos_ENABLE_CONFIGURE_TIMING', True),
 			define('Trilinos_HOSTNAME', spec.variants['ci_hostname'].value),
 			define('Trilinos_CONFIGURE_OPTIONS_FILE', trilinos_option_file),
+			define('STK_ENABLE_TESTS', False),
 			])
 
 		# ################## Trilinos Packages #####################
@@ -264,9 +290,15 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
 
 		tty.msg("ATDM_CONFIG_CUSTOM_CONFIG_DIR = {}".format(os.environ.get('ATDM_CONFIG_CUSTOM_CONFIG_DIR', 'unset')))
 		if 'ATDM_CONFIG_CUSTOM_CONFIG_DIR' in os.environ:
-			spack_env_dir=os.environ['ATDM_CONFIG_CUSTOM_CONFIG_DIR']
-			os.system(f'cp -vr {spack_env_dir} {trilinos_src}/cmake/std/atdm/')
-			os.system(f"ls -l {trilinos_src}/cmake/std/atdm/")
+			spack_env_dir     = os.environ['ATDM_CONFIG_CUSTOM_CONFIG_DIR']
+			lcl_spack_env_dir = os.path.basename(spack_env_dir)
+			dest_dir          = os.path.dirname(spack_env_dir)
+			cwd=os.getcwd()
+			tty.msg("Copying spack magic environment into Trilinos")
+			tty.msg(f"Current directory: {cwd}")
+			tty.msg(f'cp -vr {cwd}/../{lcl_spack_env_dir} {dest_dir}')
+			os.system(f'cp -vr {lcl_spack_env_dir} {dest_dir}')
+			os.system(f'ls -l {dest_dir}')
 		#self._write_spack_magic('spack_magic')
 
 		# RelWithDebInfo | Release | Debug
@@ -297,6 +329,17 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
 		super(AtdmTrilinos, self).cmake(spec,prefix)
 
 	def setup_build_environment(self, spack_env):
+		spec = self.spec
+		if '+mpi' in spec:
+			tty.msg("MPI Include: %s" % spec['mpi'].prefix.include)
+			tty.msg("MPI Libdir:  %s" % spec['mpi'].prefix.lib)
+			tty.msg("MPI libraries: %s" % spec['mpi'].libs.names)
+			tty.msg("MPI dirs: %s" % spec['mpi'].libs.directories)
+			tty.msg("CC : %s" % spec['mpi'].mpicc)
+			tty.msg("CXX: %s" % spec['mpi'].mpicxx)
+			tty.msg("FC : %s" % spec['mpi'].mpifc)
+			os.system('module list')
+
 		tty.msg("Preparing ATDM environment in setup_build_environment")
 		spack_env_dir = self._write_spack_magic()
 		self._source_spack_magic_and_add_env(spack_env_dir,spack_env)
@@ -571,10 +614,6 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
 		# this is the 'build name' givin to load-env
 		atdm_config_build_name=f'{spack_magic}-{atdm_config_compiler}-{atdm_config_build_type.lower()}-{kokkos_node_type.lower()}'
 
-		# if we were guaranteed python3.6+ we could do {atdm_config_build_type.upper()}
-		kokkos_node_type=kokkos_node_type
-		atdm_config_build_type=atdm_config_build_type
-
 		if self.spec.variants['complex'].value:
 			atdm_config_enable_complex='ON'
 			atdm_config_build_name+='-complex'
@@ -586,6 +625,16 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
 			atdm_config_build_shared_libs='ON'
 		else:
 			atdm_config_build_shared_libs='OFF'
+
+		if 'openmp' in self.spec.variants['exec_space'].value.lower():
+			atdm_config_use_openmp='ON'
+		else:
+			atdm_config_use_openmp='OFF'
+
+		if 'cuda' in self.spec.variants['exec_space'].value.lower():
+			atdm_config_use_cuda='ON'
+		else:
+			atdm_config_use_cuda='OFF'
 
 		txt=f'''
 			# this is an internal variable that enables the libraries common to both
@@ -604,8 +653,8 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
 			# they are set in ats2
 			# ATDM Settings
 			export ATDM_CONFIG_CUDA_RDC="OFF"
-			export ATDM_CONFIG_USE_CUDA=OFF
-			export ATDM_CONFIG_USE_OPENMP=OFF
+			export ATDM_CONFIG_USE_CUDA={atdm_config_use_cuda}
+			export ATDM_CONFIG_USE_OPENMP={atdm_config_use_openmp}
 			export ATDM_CONFIG_USE_PTHREADS=OFF
 			export ATDM_CONFIG_CTEST_PARALLEL_LEVEL=4
 			export ATDM_CONFIG_BUILD_COUNT=60
@@ -631,7 +680,7 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
 			export ATDM_CONFIG_SYSTEM_NAME="{spack_magic}"
 			export ATDM_CONFIG_BUILD_TYPE="{atdm_config_build_type.upper()}"
 			export ATDM_CONFIG_JOB_NAME="{atdm_config_build_name}"
-			export ATDM_CONFIG_PT_PACKAGES="OFF"
+			export ATDM_CONFIG_PT_PACKAGES="ON"
 			export ATDM_CONFIG_CUSTOM_COMPILER_SET="1"
 			export ATDM_CONFIG_COMPILER="{atdm_config_compiler}"
 			export ATDM_CONFIG_CUSTOM_CONFIG_DIR="{spack_magic_dir}"
