@@ -282,9 +282,9 @@ class Hdf5(AutotoolsPackage):
 
         if '+pic' in self.spec:
             extra_args.extend([
-                'CFLAGS='   + self.compiler.cc_pic_flag,
-                'CXXFLAGS=' + self.compiler.cxx_pic_flag,
-                'FCFLAGS='  + self.compiler.fc_pic_flag,
+                'CFLAGS='   + self.compiler.cc_pic_flag + ' -Wno-cast-align',
+                'CXXFLAGS=' + self.compiler.cxx_pic_flag + ' -Wno-cast-align',
+                'FCFLAGS='  + self.compiler.fc_pic_flag ,
             ])
 
         if '+mpi' in self.spec:
@@ -474,13 +474,15 @@ HDF5 version {version} {version}
         #spack_env.set('HDF5_PARAPREFIX', '{pref}/.hdf5_parprefix'.format(pref=os.environ.get('HOME', '/tmp')))
 
     def _find_mpiexec_and_flags(self):
+        import os
         from pprint import pprint
         spec = self.spec
 
         pprint(spec.to_dict())
 
         # Check for slurm
-        using_slurm = False
+				# adding slurm to the spec broke with Clingo
+        using_slurm = True
         slurm_checks = ['+slurm',
                         'schedulers=slurm',
                         'process_managers=slurm']
