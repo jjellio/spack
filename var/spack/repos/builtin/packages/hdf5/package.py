@@ -295,9 +295,9 @@ class Hdf5(AutotoolsPackage):
 
         if '+pic' in self.spec:
             extra_args.extend([
-                'CFLAGS='   + self.compiler.cc_pic_flag,
-                'CXXFLAGS=' + self.compiler.cxx_pic_flag,
-                'FCFLAGS='  + self.compiler.fc_pic_flag,
+                'CFLAGS='   + self.compiler.cc_pic_flag + ' -Wno-cast-align',
+                'CXXFLAGS=' + self.compiler.cxx_pic_flag + ' -Wno-cast-align',
+                'FCFLAGS='  + self.compiler.fc_pic_flag ,
             ])
 
         # Fujitsu Compiler dose not add  Fortran runtime in rpath.
@@ -447,3 +447,106 @@ HDF5 version {version} {version}
 
         # Run existing install check
         self._check_install()
+
+    @run_after('build')
+    @on_package_attributes(run_tests=True)
+    def vet_the_build(self):
+        import os
+        # h5_test fails when run in parallel
+        print('\n\n-------------------- ++++++++++++ --------------------- \n\n')
+        print('\n\nRunning make check!\n\n')
+        os.system('module list')
+        os.system('which srun')
+        os.system('srun -n6 --cpu-bind=cores,v hostname')
+        print('\n\n-------------------- ++++++++++++ --------------------- \n\n')
+        make('check-s', '-ik', parallel=True)
+        make('check-p', '-ik', parallel=False)
+        make('check', '-ik', parallel=False)
+
+    def setup_build_environment(self, spack_env):
+        import os
+        from pprint import pprint
+
+        mpiexec,np_flag = self._find_mpiexec_and_flags()
+
+        # export RUNSERIAL="srun --cpu-bind=cores -c2 -n  1"
+        # export RUNPARALLEL="srun --cpu-bind=cores -c2 -n  6"
+        run_serial = '%s %s 1' % (mpiexec,np_flag)
+        run_par    = '%s %s 6' % (mpiexec,np_flag)
+        spack_env.set('RUNSERIAL',   run_serial )
+        spack_env.set('RUNPARALLEL', run_par)
+        tty.msg("Setting HDF5 RUNSERIAL   = %s" % run_serial)
+        tty.msg("Setting HDF5 RUNPARALLEL = %s" % run_par)
+        spec = self.spec
+        if '+mpi' in spec:
+            tty.msg("MPI Include: %s" % spec['mpi'].prefix.include)
+            tty.msg("MPI Libdir:  %s" % spec['mpi'].prefix.lib)
+            tty.msg("MPI libraries: %s" % spec['mpi'].libs.names)
+            tty.msg("MPI dirs: %s" % spec['mpi'].libs.directories)
+            tty.msg("CC : %s" % spec['mpi'].mpicc)
+            tty.msg("CXX: %s" % spec['mpi'].mpicxx)
+            tty.msg("FC : %s" % spec['mpi'].mpifc)
+            os.system('module list')
+        # if we know that the build is on one node, then we can do file io out of /tmp (or some non-parallel fs)
+        #spack_env.set('HDF5_PARAPREFIX', '{pref}/.hdf5_parprefix'.format(pref=os.environ.get('HOME', '/tmp')))
+
+    def _find_mpiexec_and_flags(self):
+        import os
+        from pprint import pprint
+        spec = self.spec
+
+        pprint(spec.to_dict())
+
+        # Check for slurm
+				# adding slurm to the spec broke with Clingo
+        using_slurm = True
+        slurm_checks = ['+slurm',
+                        'schedulers=slurm',
+                        'process_managers=slurm']
+        if any(spec['mpi'].satisfies(variant) for variant in slurm_checks):
+            using_slurm = True
+        
+        if '+mpi' not in spec:
+            mpiexec='mpirun'
+            np_flag='-np'
+            return mpiexec,np_flag
+
+        # Determine MPIEXEC
+        if using_slurm:
+            tty.msg("We think we are using slurm")
+        
+            mpiexec = 'srun'
+            np_flag = '--cpu-bind=cores -c1 -n'
+            tty.msg("setting MPIEXEC to be %s" % mpiexec)
+            tty.msg("Setting srun flags to: %s" % np_flag)
+            if 'slurm' in spec:
+                mpiexec = os.path.join(spec['slurm'].prefix.bin, 'srun')
+                tty.msg("Guessing MPIEXEC = %s" % mpiexec)
+                if os.path.exists(mpiexec):
+                   return mpiexec,np_flag
+         
+                tty.msg("Guessing MPIEXEC = %s failed, path does not exist" % mpiexec)
+                mpiexec = "srun"
+                tty.msg("Setting MPIEXEC to %s" % mpiexec)
+            return mpiexec,np_flag
+        else:
+            mpiexec = 'mpirun'
+            np_flag = '-np'
+            tty.msg("Setting MPIEXEC flags to: %s" % np_flag)
+            tty.msg("setting MPIEXEC to be %s" % mpiexec)
+         
+            mpiexec = os.path.join(spec['mpi'].prefix.bin, 'mpirun')
+            tty.msg("Setting MPIEXEC to be %s" % mpiexec)
+            if os.path.exists(mpiexec):
+                return mpiexec,np_flag
+            
+            tty.msg("Guessing MPIEXEC=%s failed, path does not exist" % mpiexec)
+            mpiexec = os.path.join(spec['mpi'].prefix.bin, 'mpiexec')
+            tty.msg("Setting MPIEXEC to %s" % mpiexec)
+            if os.path.exists(mpiexec):
+                return mpiexec,np_flag
+            
+            tty.msg("Guessing MPIEXEC=%s failed, path does not exist" % mpiexec)
+            mpiexec = 'mpirun'
+            tty.msg("Setting MPIEXEC to %s" % mpiexec)
+            return mpiexec,np_flag
