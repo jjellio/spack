@@ -4,7 +4,7 @@
 # SPDX-License-Identifier: (Apache-2.0 OR MIT)
 
 import re
-
+import sys
 
 class Cmake(Package):
     """A cross-platform, open-source build system. CMake is a family of
@@ -131,6 +131,9 @@ class Cmake(Package):
     variant('doc',     default=False, description='Enables the generation of html and man page documentation')
     variant('openssl', default=True,  description="Enables CMake's OpenSSL features")
     variant('ncurses', default=True,  description='Enables the build of the ncurses gui')
+
+    variant('ninja', default=False, description='add ninja from kitware')
+    depends_on('ninja@kitware', when='+ninja', type=('build','link','run'))
 
     # Does not compile and is not covered in upstream CI (yet).
     conflicts('%gcc platform=darwin',
@@ -265,6 +268,16 @@ class Cmake(Package):
         # enable / disable oepnssl
         if '+ownlibs' in spec:
             args.append('-DCMAKE_USE_OPENSSL=%s' % str('+openssl' in spec))
+
+        # this is intended to encourage static linkage
+        # perhaps also add -ffunction-sections -fdata-sections
+        # and -Wl,--gc-sections - that is generally supported on
+        # GNU, LLVM, and Gold
+        plat = sys.platform
+        if plat.startswith("linux") or plat.startswith("cnl"):
+            args.append('-DBUILD_SHARED_LIBS=OFF')
+            args.append('-DCMAKE_FIND_LIBRARY_SUFFIXES=.a;.so')
+            #args.append('-DCMAKE_EXE_LINKER_FLAGS=-static-libgcc -static-libstdc++')
 
         return args
 
