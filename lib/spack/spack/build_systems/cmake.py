@@ -172,7 +172,7 @@ class CMakePackage(PackageBase):
             args.append(define('CMAKE_INTERPROCEDURAL_OPTIMIZATION', ipo))
 
         if primary_generator == 'Unix Makefiles':
-            args.append(define('CMAKE_VERBOSE_MAKEFILE', True))
+            args.append(define('CMAKE_VERBOSE_MAKEFILE', False))
 
         if platform.mac_ver()[0]:
             args.extend([
@@ -368,7 +368,6 @@ class CMakePackage(PackageBase):
             if self.generator == 'Unix Makefiles':
                 inspect.getmodule(self).make(*self.build_targets)
             elif self.generator == 'Ninja':
-                self.build_targets.append("-v")
                 inspect.getmodule(self).ninja(*self.build_targets)
 
     def install(self, spec, prefix):
