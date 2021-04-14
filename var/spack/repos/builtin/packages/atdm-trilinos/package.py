@@ -143,7 +143,7 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
         'cgns': {
             'version': '',
             'variant': '~base_scope~int64~ipo~legacy~mem_debug~fortran'
-                       '+hdf5+mpi+parallel+scoping+static+ninja'
+                       '+hdf5+mpi+parallel+scoping+static'
                        ' build_type=Release'
             },
         'boost': {
