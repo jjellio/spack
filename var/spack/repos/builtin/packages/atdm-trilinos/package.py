@@ -165,15 +165,15 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
             }
         }
 
-    tty.debug(f'Determining Trilinos requirements for third party libraries (tpls)')
-    for tpl,tpl_config in tpl_variant_map.items():
+    tty.debug('Determining Trilinos requirements for third party libraries (tpls)')
+    for tpl, tpl_config in tpl_variant_map.items():
         vers = tpl_config["version"]
         opts = tpl_config['variant']
         tty.debug(f'{tpl} : version = {vers if vers else "any"}')
         tty.debug(f'      : variant = {opts}')
         depends_on(f'{tpl}{vers}{opts}',
                    type=('build', 'link', 'run'))
-        if tpl not in [ 'cgns' ]:
+        if tpl not in ['cgns']:
             depends_on(f'{tpl}+shared', when='+tpls_shared')
             depends_on(f'{tpl}~shared', when='~tpls_shared')
 
@@ -182,22 +182,22 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
     # a lapack/blas provider (in libsci), and then enforce that dependencies
     # use the declared provider (and spec).
     depends_on('superlu-dist+openmp',
-            type=('build', 'link', 'run'),
-            when='exec_space=openmp')
+               type=('build', 'link', 'run'),
+               when='exec_space=openmp')
     depends_on('superlu-dist~openmp',
-            type=('build', 'link', 'run'),
-            when='exec_space=serial')
+               type=('build', 'link', 'run'),
+               when='exec_space=serial')
     # without clingo, I tried this... which caused the conretizer to go into an
     # infinite loop
-    #depends_on('superlu-dist@6.4.0~ipo~int64+shared+openmp^cray-libsci+openmp',
-    #               type=('build', 'link', 'run'),
-    #               when='exec_space=openmp host_lapack=libsci')
-    #depends_on('superlu-dist@6.4.0~ipo~int64+shared~openmp^cray-libsci~openmp',
-    #               type=('build', 'link', 'run'),
-    #               when='exec_space=serial host_lapack=libsci')
+    # depends_on('superlu-dist@6.4.0~ipo~int64+shared+openmp^cray-libsci+openmp',
+    #                type=('build', 'link', 'run'),
+    #                when='exec_space=openmp host_lapack=libsci')
+    # depends_on('superlu-dist@6.4.0~ipo~int64+shared~openmp^cray-libsci~openmp',
+    #                type=('build', 'link', 'run'),
+    #                when='exec_space=serial host_lapack=libsci')
 
     patch('cray_secas.patch')
-    #patch('shylu.patch')
+    # patch('shylu.patch')
     patch('https://github.com/trilinos/Trilinos/commit/61b3d7814c3da30b0d1d5bf8b9531df8f885ce96.patch',
           sha256='cb39b9f8503621ba8203ffa1a22081129a7905c463771ca4a8dcf6fbd0c1af7a',
           when='+empire')
@@ -217,62 +217,48 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
         options = []
         define = CMakePackage.define
 
-        #import traceback
-        #traceback.print_stack()
+        # import traceback
+        # traceback.print_stack()
         disable_options = []
 
-        trilinos_option_file='cmake/std/atdm/ATDMDevEnv.cmake'
+        opt_file = 'cmake/std/atdm/ATDMDevEnv.cmake'
         if '+empire' in spec:
-            trilinos_option_file+=';cmake/std/atdm/apps/empire/EMPIRETrilinosEnables.cmake'
-            disable_options = [ 'STK_ENABLE_TESTS',
-                                'Piro_ENABLE_TESTS',
-                                'Piro_ENABLE_EXAMPLES',
-                                ]
+            opt_file += ';cmake/std/atdm/apps/empire/EMPIRETrilinosEnables.cmake'
+            disable_options = ['STK_ENABLE_TESTS',
+                               'Piro_ENABLE_TESTS',
+                               'Piro_ENABLE_EXAMPLES',
+                               ]
 
         if '+sparc' in spec:
-            trilinos_option_file+=';cmake/std/atdm/apps/sparc/SPARCTrilinosPackagesEnables.cmake'
+            opt_file += ';cmake/std/atdm/apps/sparc/SPARCTrilinosPackagesEnables.cmake'
 
         if '+trace_cmake' in spec:
-            options +=['--trace-expand']
+            options += ['--trace-expand']
         options.extend([
             define('Trilinos_ENABLE_TESTS', True),
             define('Trilinos_ENABLE_EXAMPLES', True),
             define('CMAKE_VERBOSE_MAKEFILE', False),
             define('CMAKE_CXX_LINK_FLAGS', '-fuse-ld=lld -Wl,--threads=8'),
             define('CMAKE_C_LINK_FLAGS', '-fuse-ld=lld -Wl,--threads=8'),
-            #define('Trilinos_ENABLE_ALL_OPTIONAL_PACKAGES', True),
-            #define('Trilinos_WARNINGS_AS_ERRORS_FLAGS', ''),
-            #define('Trilinos_ALLOW_NO_PACKAGES', True),
-            #define('Trilinos_DISABLE_ENABLED_FORWARD_DEP_PACKAGES', True),
-            #define('Trilinos_DEPS_XML_OUTPUT_FILE', ''),
-            #define('Trilinos_ENABLE_SECONDARY_TESTED_CODE', True),
-            #define('Trilinos_EXTRAREPOS_FILE', ''),
-            #define('Trilinos_IGNORE_MISSING_EXTRA_REPOSITORIES', True),
-            #define('Trilinos_ENABLE_KNOWN_EXTERNAL_REPOS_TYPE', 'None'),
+            # define('Trilinos_ENABLE_ALL_OPTIONAL_PACKAGES', True),
+            # define('Trilinos_WARNINGS_AS_ERRORS_FLAGS', ''),
+            # define('Trilinos_ALLOW_NO_PACKAGES', True),
+            # define('Trilinos_DISABLE_ENABLED_FORWARD_DEP_PACKAGES', True),
+            # define('Trilinos_DEPS_XML_OUTPUT_FILE', ''),
+            # define('Trilinos_ENABLE_SECONDARY_TESTED_CODE', True),
+            # define('Trilinos_EXTRAREPOS_FILE', ''),
+            # define('Trilinos_IGNORE_MISSING_EXTRA_REPOSITORIES', True),
+            # define('Trilinos_ENABLE_KNOWN_EXTERNAL_REPOS_TYPE', 'None'),
             define('Trilinos_ENABLE_ALL_PACKAGES', True),
             define('Trilinos_TRACE_ADD_TEST', True),
             define('Trilinos_ENABLE_CONFIGURE_TIMING', True),
             define('Trilinos_HOSTNAME', spec.variants['ci_hostname'].value),
-            define('Trilinos_CONFIGURE_OPTIONS_FILE', trilinos_option_file),
+            define('Trilinos_CONFIGURE_OPTIONS_FILE', opt_file),
             define('Trilinos_ENABLE_BUILD_STATS', True),
             ])
 
         for disable_opt in disable_options:
-            options += [define(disable_opt,False)]
-        # ################## Trilinos Packages #####################
-        # we want to 'source' 
-
-
-        #blas = spec['blas'].libs
-        #lapack = spec['lapack'].libs
-        #options.extend([
-        #        define('TPL_ENABLE_BLAS', True),
-        #        define('BLAS_LIBRARY_NAMES', blas.names),
-        #        define('BLAS_LIBRARY_DIRS', blas.directories),
-        #        define('TPL_ENABLE_LAPACK', True),
-        #        define('LAPACK_LIBRARY_NAMES', lapack.names),
-        #        define('LAPACK_LIBRARY_DIRS', lapack.directories),
-        #])
+            options += [define(disable_opt, False)]
 
         return options
 
@@ -283,11 +269,11 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
         """
         # standard CMake arguments
         if "+ninja" in self.spec:
-            CMakePackage.generator="Ninja"
+            CMakePackage.generator = "Ninja"
 
         std_cmake_args = CMakePackage._std_args(self)
 
-        #std_cmake_args += getattr(self, 'cmake_flag_args', [])
+        # std_cmake_args += getattr(self, 'cmake_flag_args', [])
         return std_cmake_args
 
     def build(self, spec, prefix):
@@ -301,18 +287,20 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
     def cmake(self, spec, prefix):
         print("++++========== ////      ||||     \\\\\\\\ ================== ++++++")
         print(" Calling cmake hook:")
-        print("Current ATDM_CONFIG_COMPLETED_ENV_SETUP = {}".format(os.environ.get('ATDM_CONFIG_COMPLETED_ENV_SETUP', 'unset')))
+        print("Current ATDM_CONFIG_COMPLETED_ENV_SETUP = {0}"
+              "".format(os.environ.get('ATDM_CONFIG_COMPLETED_ENV_SETUP', 'unset')))
 
         # atdm config source location
-        trilinos_src=self.stage.source_path
+        trilinos_src = self.stage.source_path
         os.system("ls -l {}".format(trilinos_src))
 
-        tty.msg("ATDM_CONFIG_CUSTOM_CONFIG_DIR = {}".format(os.environ.get('ATDM_CONFIG_CUSTOM_CONFIG_DIR', 'unset')))
+        tty.msg("ATDM_CONFIG_CUSTOM_CONFIG_DIR = {}"
+                "".format(os.environ.get('ATDM_CONFIG_CUSTOM_CONFIG_DIR', 'unset')))
         if 'ATDM_CONFIG_CUSTOM_CONFIG_DIR' in os.environ:
             spack_env_dir     = os.environ['ATDM_CONFIG_CUSTOM_CONFIG_DIR']
-            lcl_spack_env_dir = spack_env_dir # os.path.basename(spack_env_dir)
+            lcl_spack_env_dir = spack_env_dir  # os.path.basename(spack_env_dir)
             dest_dir          = f'{trilinos_src}/cmake/std/atdm/{os.path.basename(spack_env_dir)}'
-            cwd=os.getcwd()
+            cwd = os.getcwd()
             tty.msg("Copying spack magic environment into Trilinos")
             tty.msg(f"Current directory: {cwd}")
             tty.msg(f'cp -vr {lcl_spack_env_dir} {dest_dir}')
