@@ -1,0 +1,191 @@
+# Copyright 2013-2021 Lawrence Livermore National Security, LLC and other
+# Spack Project Developers. See the top-level COPYRIGHT file for details.
+#
+# SPDX-License-Identifier: (Apache-2.0 OR MIT)
+
+import os
+import sys
+from spack import *
+from spack.operating_systems.mac_os import macos_version
+from spack.pkg.builtin.kokkos import Kokkos
+
+# Trilinos is complicated to build, as an inspiration a couple of links to
+# other repositories which build it:
+# https://github.com/hpcugent/easybuild-easyblocks/blob/master/easybuild/easyblocks/t/trilinos.py#L111
+# https://github.com/koecher/candi/blob/master/deal.II-toolchain/packages/trilinos.package
+# https://gitlab.com/configurations/cluster-config/blob/master/trilinos.sh
+# https://github.com/Homebrew/homebrew-science/blob/master/trilinos.rb and some
+# relevant documentation/examples:
+# https://github.com/trilinos/Trilinos/issues/175
+
+
+class AtdmTrilinos(CMakePackage, CudaPackage):
+    """The Trilinos Project is an effort to develop algorithms and enabling
+    technologies within an object-oriented software framework for the solution
+    of large-scale, complex multi-physics engineering and scientific problems.
+    A unique design feature of Trilinos is its focus on packages.
+    """
+    homepage = "https://trilinos.org/"
+    git      = "https://github.com/trilinos/Trilinos.git"
+
+    maintainers = ['keitat']
+
+    # ###################### Versions ##########################
+
+    version('xsdk-0.2.0', tag='xsdk-0.2.0')
+    version('develop', branch='develop', preferred=True)
+    version('master', branch='master')
+    version('13.0.1', commit='4796b92fb0644ba8c531dd9953e7a4878b05c62d')  # tag trilinos-release-13-0-1
+    version('13.0.0', commit='9fec35276d846a667bc668ff4cbdfd8be0dfea08')  # tag trilinos-release-13-0-0
+    version('12.18.1', commit='55a75997332636a28afc9db1aee4ae46fe8d93e7')  # tag trilinos-release-12-8-1
+
+    # ###################### Variants ##########################
+    ##    netcdf-c:
+    ##      variants: ~hdf4~jna+mpi+parallel-netcdf+dap+pic+shared build_type=RelWithDebInfo
+    ##    parallel-netcdf:
+    ##      variants: ~cxx~burstbuffer+fortran+pic+shared
+    ##    cgns:
+    ##      variants: ~base_scope~int64~ipo~legacy~mem_debug~fortran+hdf5+mpi+parallel+scoping+static+ninja  build_type=RelWithDebInfo
+    ##    hdf5:
+    ##      variants: ~cxx~debug~threadsafe~java+fortran+hl+mpi+pic+shared+szip build_type=RelWithDebInfo
+    ##      version:  [ 1.10.7 ]
+    ##    boost:
+    ##      variants: +shared+pic+system+icu build_type=RelWithDebInfo
+    ##    superlu-dist:
+    ##      variants:  ~cuda~ipo~int64+shared ^cray-libsci ~mpi+shared  build_type=RelWithDebInfo
+    ##                # ~cuda~ipo~int64+openmp+shared ^cray-libsci ~mpi+openmp+shared
+    ##                # ~cuda~ipo~int64~openmp+shared ^cray-libsci ~mpi~openmp+shared
+    ##    parmetis:
+    ##      variants: ~gdb~ipo~int64+ninja+shared  build_type=RelWithDebInfo
+    ##    metis:
+    ##      variants: ~gdb+real64~int64+shared  build_type=RelWithDebInfo
+    depends_on('mpi',
+               type=('build', 'link', 'run'),
+               when='+atdm')
+    depends_on('hdf5@1.10.7+fortran+hl+mpi+pic+shared+szip',
+               type=('build', 'link', 'run'),
+               when='+atdm')
+    depends_on('netcdf-c@4.7.0:4.7.99+mpi+parallel-netcdf+dap+pic+shared',
+               type=('build', 'link', 'run'),
+               when='+atdm')
+    depends_on('parallel-netcdf+fortran+pic+shared',
+               type=('build', 'link', 'run'),
+               when='+atdm')
+    depends_on('parmetis@4.0.3~int64+ninja+shared',
+               type=('build', 'link', 'run'),
+               when='+atdm')
+    depends_on('metis@+real64~int64+shared',
+               type=('build', 'link', 'run'),
+               when='+atdm')
+    depends_on('cgns',
+               type=('build', 'link', 'run'),
+               when='+atdm')
+    depends_on('superlu-dist@6.4.0 ~ipo~int64+shared',
+               type=('build', 'link', 'run'),
+               when='+atdm')
+    depends_on('boost+shared+pic+system+icu',
+               type=('build', 'link', 'run'),
+               when='+atdm')
+
+    depends_on('blas', type=('build', 'link', 'run'))
+    depends_on('lapack', type=('build', 'link', 'run'))
+    depends_on('zlib', when="+zlib")
+    depends_on('python@3:', type=('build', 'link', 'run'))
+
+    variant('ninja', default=True, description='Uses Ninja build system')
+
+    depends_on('cmake@3.19:',    type='build')
+    depends_on('ninja@kitware:', type='build', when='+ninja')
+
+    variant('shared', default=True)
+
+    variant('exec_space', default='serial',
+            values=('serial',
+                    'openmp',
+                    'cuda',
+                    'rocm'),
+            description='the execution space to build')
+
+    variant('blas_provider', default='libsci',
+            values=('libsci', 'openblas'),
+            multi=False,
+            description='restrict blas/lapack to this')
+    
+    depends_on('cray-libsci~mpi+shared', when('blas_provider=libsci'))
+    depends_on('cray-libsci~mpi+shared+openmp', when('exec_space=openmp'))
+    depends_on('cray-libsci~mpi+shared~openmp', when('exec_space=serial'))
+    depends_on('superlu-dist@6.4.0 ~ipo~int64+shared+openmp ^cray-libsci~mpi+shared+openmp',
+               when='exec_space=openmp')
+    depends_on('superlu-dist@6.4.0 ~ipo~int64+shared~openmp ^cray-libsci~mpi+shared~openmp',
+               when='exec_space=serial')
+
+    # ###################### Dependencies ##########################
+
+
+    def url_for_version(self, version):
+        url = "https://github.com/trilinos/Trilinos/archive/trilinos-release-{0}.tar.gz"
+        return url.format(version.dashed)
+
+    def setup_build_environment(self, env):
+        spec = self.spec
+        if 'exec_space=cuda' in spec:
+                print("Don't know how to do Cuda on cray....\n")
+                system.exit(-1)
+
+    def cmake_args(self):
+        spec = self.spec
+        define = CMakePackage.define
+
+        options = []
+        options.extend(['-D Trilinos_CONFIGURE_OPTIONS_FILE:STRING=cmake/std/atdm/ATDMDevEnv.cmake,cmake/std/atdm/apps/empire/EMPIRETrilinosEnables.cmake',
+            define('Trilinos_ENABLE_TESTS', True),
+            define('Trilinos_ENABLE_EXAMPLES', True),
+            ])
+
+        # ################## Trilinos Packages #####################
+        # we want to 'source' 
+
+
+        #blas = spec['blas'].libs
+        #lapack = spec['lapack'].libs
+        #options.extend([
+        #    define('TPL_ENABLE_BLAS', True),
+        #    define('BLAS_LIBRARY_NAMES', blas.names),
+        #    define('BLAS_LIBRARY_DIRS', blas.directories),
+        #    define('TPL_ENABLE_LAPACK', True),
+        #    define('LAPACK_LIBRARY_NAMES', lapack.names),
+        #    define('LAPACK_LIBRARY_DIRS', lapack.directories),
+        #])
+
+        return options
+
+    @property
+    def std_cmake_args(self):
+        """This allows the Ninja generator to be set based on the spec
+        :return: standard cmake arguments
+        """
+        # standard CMake arguments
+        if "+ninja" in self.spec:
+            CMakePackage.generator="Ninja"
+
+        std_cmake_args = CMakePackage._std_args(self)
+
+        std_cmake_args += getattr(self, 'cmake_flag_args', [])
+        return std_cmake_args
+
+    @run_after('install')
+    def filter_python(self):
+        # When trilinos is built with Python, libpytrilinos is included
+        # through cmake configure files. Namely, Trilinos_LIBRARIES in
+        # TrilinosConfig.cmake contains pytrilinos. This leads to a
+        # run-time error: Symbol not found: _PyBool_Type and prevents
+        # Trilinos to be used in any C++ code, which links executable
+        # against the libraries listed in Trilinos_LIBRARIES.  See
+        # https://github.com/Homebrew/homebrew-science/issues/2148#issuecomment-103614509
+        # A workaround is to remove PyTrilinos from the COMPONENTS_LIST :
+        if '+python' in self.spec:
+            filter_file(r'(SET\(COMPONENTS_LIST.*)(PyTrilinos;)(.*)',
+                        (r'\1\3'),
+                        '%s/cmake/Trilinos/TrilinosConfig.cmake' %
+                        self.prefix.lib)
+

@@ -1,0 +1,22 @@
+diff --git a/packages/shylu/shylu_dd/bddc/cmake/Dependencies.cmake b/packages/shylu/shylu_dd/bddc/cmake/Dependencies.cmake
+index 72e8f7d2..a5e66d5c 100644
+--- a/packages/shylu/shylu_dd/bddc/cmake/Dependencies.cmake
++++ b/packages/shylu/shylu_dd/bddc/cmake/Dependencies.cmake
+@@ -4,6 +4,6 @@ SET(TEST_REQUIRED_DEP_PACKAGES Gtest)
+ SET(TEST_OPTIONAL_DEP_PACKAGES)
+ SET(LIB_REQUIRED_DEP_TPLS MPI BLAS LAPACK)
+ SET(LIB_OPTIONAL_DEP_TPLS MKL PARDISO_MKL SuperLU METIS ParMETIS)
+-SET(TEST_REQUIRED_DEP_TPLS)
++SET(TEST_REQUIRED_DEP_TPLS Gtest)
+ SET(TEST_OPTIONAL_DEP_TPLS)
+ 
+diff --git a/packages/shylu/shylu_node/tacho/cmake/Dependencies.cmake b/packages/shylu/shylu_node/tacho/cmake/Dependencies.cmake
+index c184b938..2eb84fe6 100644
+--- a/packages/shylu/shylu_node/tacho/cmake/Dependencies.cmake
++++ b/packages/shylu/shylu_node/tacho/cmake/Dependencies.cmake
+@@ -5,4 +5,4 @@ SET(TEST_OPTIONAL_DEP_PACKAGES)
+ SET(LIB_REQUIRED_DEP_TPLS)
+ SET(LIB_OPTIONAL_DEP_TPLS METIS Scotch Cholmod HWLOC HYPRE MKL LAPACK BLAS Pthread QTHREAD VTune CUSOLVER CUSPARSE CUBLAS CUDA)
+-SET(TEST_REQUIRED_DEP_TPLS BLAS LAPACK)
++SET(TEST_REQUIRED_DEP_TPLS BLAS LAPACK Gtest)
+ SET(TEST_OPTIONAL_DEP_TPLS METIS HWLOC Cholmod MKL LAPACK BLAS Pthread QTHREAD CUSOLVER CUSPARSE CUBLAS CUDA)
