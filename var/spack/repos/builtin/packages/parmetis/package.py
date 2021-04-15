@@ -41,7 +41,7 @@ class Parmetis(CMakePackage):
 
     patch('parmetis-enable-shared-and-static.patch',
           sha256='7be1563dcde9b2d19e8a51d7908a2db6babe425124fc9f2d25df6b80c91df97f',
-          when='@4.0.3')
+          when='@4.0.3 +shared')
 
     def flag_handler(self, name, flags):
         if name == 'cflags':
