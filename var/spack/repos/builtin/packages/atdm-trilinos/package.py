@@ -99,6 +99,10 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
     # my cmake package has a +ninja... maybe that should get committed upstream
     depends_on('ninja@kitware', when='+ninja')
 
+    depends_on('python@3:',
+               type=('build', 'link', 'run'))
+    depends_on('perl',
+               type=('build', 'link', 'run'))
     # ###################### Host Lapack/Blas ##################
     depends_on('cray-libsci~mpi+shared+openmp',
                type=('build', 'link', 'run'),
@@ -136,8 +140,7 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
             },
         'metis': {
             'version': '@5:',
-            'variant': '~gdb~int64'
-                       '+real64'
+            'variant': '~gdb~int64~real64'
                        ' build_type=Release'
             },
         'cgns': {
@@ -155,14 +158,6 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
             'variant': '~ipo~int64'
                        ' build_type=Release'
             },
-        'python': {
-            'version': '@3:',
-            'variant': ''
-            },
-        'perl': {
-            'version': '',
-            'variant': ''
-            }
         }
 
     tty.debug('Determining Trilinos requirements for third party libraries (tpls)')
@@ -221,6 +216,9 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
         # traceback.print_stack()
         disable_options = []
 
+        # define the max number of MPI procs a test can require
+        trilinos_ci_max_num_procs = 16
+
         opt_file = 'cmake/std/atdm/ATDMDevEnv.cmake'
         if '+empire' in spec:
             opt_file += ';cmake/std/atdm/apps/empire/EMPIRETrilinosEnables.cmake'
@@ -234,6 +232,11 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
 
         if '+trace_cmake' in spec:
             options += ['--trace-expand']
+
+        # try to be static if asked to be
+        if '~tpl_shared' in spec:
+            options += [define('CMAKE_FIND_LIBRARY_SUFFIXES', '.a;.so')]
+
         options.extend([
             define('Trilinos_ENABLE_TESTS', True),
             define('Trilinos_ENABLE_EXAMPLES', True),
@@ -255,6 +258,7 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
             define('Trilinos_HOSTNAME', spec.variants['ci_hostname'].value),
             define('Trilinos_CONFIGURE_OPTIONS_FILE', opt_file),
             define('Trilinos_ENABLE_BUILD_STATS', True),
+            define('MPI_EXEC_MAX_NUMPROCS', trilinos_ci_max_num_procs)
             ])
 
         for disable_opt in disable_options:
@@ -280,9 +284,11 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
         """Make the build targets"""
         with working_dir(self.build_directory):
             if self.generator == 'Unix Makefiles':
-                inspect.getmodule(self).make(*self.build_targets, '-ik')
+                inspect.getmodule(self).make(*self.build_targets, '-ik',
+                                             fail_on_error=False)
             elif self.generator == 'Ninja':
-                inspect.getmodule(self).ninja(*self.build_targets, '-k 0')
+                inspect.getmodule(self).ninja(*self.build_targets, '-k 0',
+                                              fail_on_error=False)
 
     def cmake(self, spec, prefix):
         print("++++========== ////      ||||     \\\\\\\\ ================== ++++++")
@@ -299,41 +305,16 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
         if 'ATDM_CONFIG_CUSTOM_CONFIG_DIR' in os.environ:
             spack_env_dir     = os.environ['ATDM_CONFIG_CUSTOM_CONFIG_DIR']
             lcl_spack_env_dir = spack_env_dir  # os.path.basename(spack_env_dir)
-            dest_dir          = f'{trilinos_src}/cmake/std/atdm/{os.path.basename(spack_env_dir)}'
+            dest_dir = '{0}/cmake/std/atdm/{1}'.format(trilinos_src,
+                                                       os.path.basename(spack_env_dir))
             cwd = os.getcwd()
             tty.msg("Copying spack magic environment into Trilinos")
             tty.msg(f"Current directory: {cwd}")
             tty.msg(f'cp -vr {lcl_spack_env_dir} {dest_dir}')
             os.system(f'cp -vr {lcl_spack_env_dir} {dest_dir}')
             os.system(f'ls -l {dest_dir}')
-        #self._write_spack_magic('spack_magic')
 
-        # RelWithDebInfo | Release | Debug
-        # be careful here... Trilinos release-debug enables bound checking in kokkos
-        # we are probably best using release in Trilinos + -g
-        #print("build_type = {}".format(self.spec.variants['build_type'].value))
-
-        # we want to 'source' an ENV script with the proper build tokens
-        # then capture the ENV changes between then vs now. (should be
-        # abunch of ATDM_ prefixed variables)
-        # we then set those vars in SPACK's build ENV
-        # but set the values for TPLs to match SPACKs
-        #
-        # optionally, write out a suitable ENV in return that could be used after the build
-        # to load-matching-env.sh
-        #pprint(spec.to_dict())
-        #pprint(self.__dict__)
-        #pprint(self.stage.__dict__)
-        #pprint(self.stage.source_path)
-
-        #self._source_build_id_and_add_env('spack_magic')
-        #command = shlex.split("bash -c 'env | grep ^ATDM'")
-        #proc = subprocess.Popen(command, stdout = subprocess.PIPE)
-        #for line in proc.stdout:
-        #       print(line)
-        #proc.communicate()
-
-        super(AtdmTrilinos, self).cmake(spec,prefix)
+        super(AtdmTrilinos, self).cmake(spec, prefix)
 
     def setup_build_environment(self, spack_env):
         spec = self.spec
@@ -350,16 +331,16 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
         spack_env.set('SPACK_DEBUG', "FALSE")
         tty.msg("Preparing ATDM environment in setup_build_environment")
         spack_env_dir = self._write_spack_magic()
-        self._source_spack_magic_and_add_env(spack_env_dir,spack_env)
+        self._source_spack_magic_and_add_env(spack_env_dir, spack_env)
 
     def _write_spack_magic(self, spack_magic_name='spack_magic'):
         tty.msg("Generating ATDM config environment called {}".format(spack_magic_name))
 
         # write into Trilinos_src/cmake/std/atdm (we don't technically need to)
         # trilinos doesn't exists yet.. so make it in cwd()
-        spack_env_dir='/tmp/{0}'.format(spack_magic_name)
-        #spack_env_dir='{}/cmake/std/atdm/{}'.format(self.stage.source_path,spack_magic_name)
-        tty.msg(f"Generating ATDM config, creating directory: {spack_env_dir}")
+        spack_env_dir = '/tmp/{0}'.format(spack_magic_name)
+        tty.msg('Generating ATDM config, creating directory: {0}'
+                ''.format(spack_env_dir))
         try:
             os.mkdir(spack_env_dir)
         except FileExistsError:
@@ -368,62 +349,56 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
         self._write_spack_magic_trilinos_env(spack_env_dir)
         self._write_spack_magic_custom_builds(spack_env_dir)
 
-        spack_env_file=f'{spack_env_dir}/environment.sh'
-        os.system("ls -l {}".format(spack_env_dir))
-        os.system("echo {}".format(spack_env_file))
-        os.system("cat {}".format(spack_env_file))
+        spack_env_file = '{0}/environment.sh'.format(spack_env_dir)
+        os.system("ls -l {0}".format(spack_env_dir))
+        os.system("echo {0}".format(spack_env_file))
+        os.system("cat {0}".format(spack_env_file))
 
         return spack_env_dir
 
     def _get_atdm_compiler_config_name(self):
         """
-        This is not strictly necessary, but this allows us to express a 'config name'
-        for the recipe we are about to build.  By default, Trilinos uses some well defined
-        names that map directly to CDash dashboards.
+        This is not strictly necessary, but this allows us to express a
+        'config name' for the recipe we are about to build.  By default,
+        Trilinos uses some well defined names that map directly to CDash
+        dashboards.
 
-        For now we want to capture things like accelerator, compiler, and MPI names/versions
+        For now we want to capture things like accelerator, compiler, and
+        MPI names/versions
 
         Data is written to
-                {spack_env_dir}/custom_builds.sh
-                export ATDM_CONFIG_COMPILER={compiler_name}-{compiler_version}_{mpi_name}-{mpi_version}[-{more}...]
+          {spack_env_dir}/custom_builds.sh
+          export ATDM_CONFIG_COMPILER={compiler_name}-{compiler_version}_
+                                      {mpi_name}-{mpi_version}[-{more}...]
         """
-        compiler_name,compiler_version = self._get_compiler_name_version()
-        atdm_config_name=f'{compiler_name}-{compiler_version}'
-        if 'exec_space=rocm' in self.spec:
-            rocm_name,rocm_version = self._get_true_name_version('rocm')
-            atdm_config_name+=f'_{rocm_name}-{rocm_version}'
-        elif 'exec_space=openmp' in self.spec:
-            atdm_config_name+='_openmp'
+        exec_space = self.spec.variants['exec_space'].value
 
-        mpi_name,mpi_version = self._get_true_name_version('mpi')
-        atdm_config_name+=f'_{mpi_name}-{mpi_version}'
+        compiler_name, compiler_version = self._get_compiler_name_version()
+        atdm_config_name = '{0}-{1}'.format(compiler_name, compiler_version)
+        if exec_space == 'rocm':
+            rocm_name, rocm_version = self._get_true_name_version('rocm')
+            atdm_config_name += '_{0}-{1}'.format(rocm_name, rocm_version)
+        elif exec_space == 'openmp':
+            atdm_config_name += '_openmp'
+
+        mpi_name, mpi_version = self._get_true_name_version('mpi')
+        atdm_config_name += '_{0}-{1}'.format(mpi_name, mpi_version)
 
         return atdm_config_name
 
     def _write_spack_magic_custom_builds(self, spack_magic_dir):
-        """
-        This is not strictly necessary, but this allows us to express a 'config name'
-        for the recipe we are about to build.  By default, Trilinos uses some well defined
-        names that map directly to CDash dashboards.
-
-        For now we want to capture things like accelerator, compiler, and MPI names/versions
-
-        Data is written to
-                {spack_env_dir}/custom_builds.sh
-                export ATDM_CONFIG_COMPILER={compiler_name}-{compiler_version}_{mpi_name}-{mpi_version}[-{more}...]
-        """
 
         atdm_config_name = self._get_atdm_compiler_config_name()
 
-        template=f"""
+        template = """
         # write to spack_env_dir/custom_builds.sh
-        export ATDM_CONFIG_COMPILER="{atdm_config_name}"
-        """
+        export ATDM_CONFIG_COMPILER="{0}"
+        """.format(atdm_config_name)
 
         tty.msg("Writing ATDM config custom_builds.sh")
         tty.msg(f"Chose ATDM_CONFIG_COMPILER={atdm_config_name}")
 
-        spack_compiler_file=f'{spack_magic_dir}/custom_builds.sh'
+        spack_compiler_file = '{0}/custom_builds.sh'.format(spack_magic_dir)
         with open(spack_compiler_file, "w") as fptr:
             fptr.write(dedent(template))
 
@@ -451,106 +426,143 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
 
             ATDM_SET_ENABLE(TPL_BinUtils_LIBRARIES "$ENV{ATDM_CONFIG_BINUTILS_LIBS}")
 
-            ATDM_SET_CACHE(TPL_BLAS_LIBRARIES "$ENV{ATDM_CONFIG_BLAS_LIBS}" CACHE FILEPATH)
-            ATDM_SET_CACHE(TPL_LAPACK_LIBRARIES "$ENV{ATDM_CONFIG_LAPACK_LIBS}" CACHE FILEPATH)
+            ATDM_SET_CACHE(TPL_BLAS_LIBRARIES "$ENV{ATDM_CONFIG_BLAS_LIBS}"
+                           CACHE FILEPATH)
+            ATDM_SET_CACHE(TPL_LAPACK_LIBRARIES "$ENV{ATDM_CONFIG_LAPACK_LIBS}"
+                           CACHE FILEPATH)
 
             #
             # maybe best to ignore boost... they hardcode the paths as-is
             #
             ATDM_SET_CACHE(TPL_Boost_LIBRARIES
-               "$ENV{BOOST_ROOT}/lib/libboost_program_options.${ATDM_TPL_LIB_EXT};$ENV{BOOST_ROOT}/lib/libboost_system.${ATDM_TPL_LIB_EXT}"
+               "$ENV{BOOST_ROOT}/lib/libboost_program_options.${ATDM_TPL_LIB_EXT};
+                $ENV{BOOST_ROOT}/lib/libboost_system.${ATDM_TPL_LIB_EXT}"
               CACHE FILEPATH)
 
             # BoostLib
             IF (NOT "$ENV{ATDM_CONFIG_BOOST_LIBS}" STREQUAL "")
-              ATDM_SET_CACHE(TPL_BoostLib_LIBRARIES "$ENV{ATDM_CONFIG_BOOST_LIBS}" CACHE FILEPATH)
+              ATDM_SET_CACHE(TPL_BoostLib_LIBRARIES "$ENV{ATDM_CONFIG_BOOST_LIBS}"
+                             CACHE FILEPATH)
             ELSE()
               ATDM_SET_CACHE(TPL_BoostLib_LIBRARIES
-                "$ENV{BOOST_ROOT}/lib/libboost_program_options.${ATDM_TPL_LIB_EXT};$ENV{BOOST_ROOT}/lib/libboost_system.${ATDM_TPL_LIB_EXT}"
+                "$ENV{BOOST_ROOT}/lib/libboost_program_options.${ATDM_TPL_LIB_EXT};
+                 $ENV{BOOST_ROOT}/lib/libboost_system.${ATDM_TPL_LIB_EXT}"
                 CACHE FILEPATH)
             ENDIF()
 
             # METIS
-            ATDM_SET_CACHE(TPL_METIS_LIBRARIES "$ENV{ATDM_CONFIG_METIS_LIBS}" CACHE FILEPATH)
+            ATDM_SET_CACHE(TPL_METIS_LIBRARIES "$ENV{ATDM_CONFIG_METIS_LIBS}"
+                           CACHE FILEPATH)
 
             # ParMETIS
-            ATDM_SET_CACHE(TPL_ParMETIS_LIBRARIES "$ENV{ATDM_CONFIG_PARMETIS_LIBS}" CACHE FILEPATH)
-
+            ATDM_SET_CACHE(TPL_ParMETIS_LIBRARIES "$ENV{ATDM_CONFIG_PARMETIS_LIBS}"
+                           CACHE FILEPATH)
 
             # CGNS
             IF (NOT "$ENV{ATDM_CONFIG_CGNS_LIBRARY_NAMES}" STREQUAL "")
-              ATDM_SET_CACHE(CGNS_LIBRARY_NAMES "$ENV{ATDM_CONFIG_CGNS_LIBRARY_NAMES}" CACHE FILEPATH)
+              ATDM_SET_CACHE(CGNS_LIBRARY_NAMES
+                             "$ENV{ATDM_CONFIG_CGNS_LIBRARY_NAMES}" CACHE FILEPATH)
             ENDIF()
-            ATDM_SET_CACHE(TPL_CGNS_LIBRARIES "$ENV{ATDM_CONFIG_CGNS_LIBS}" CACHE FILEPATH)
+            ATDM_SET_CACHE(TPL_CGNS_LIBRARIES "$ENV{ATDM_CONFIG_CGNS_LIBS}"
+                           CACHE FILEPATH)
 
             # HDF5
-              ATDM_SET_CACHE(TPL_HDF5_LIBRARIES "$ENV{ATDM_CONFIG_HDF5_LIBS}" CACHE FILEPATH)
+              ATDM_SET_CACHE(TPL_HDF5_LIBRARIES "$ENV{ATDM_CONFIG_HDF5_LIBS}"
+                             CACHE FILEPATH)
 
             # Netcdf
-                ATDM_SET_CACHE(TPL_Netcdf_LIBRARIES "$ENV{ATDM_CONFIG_NETCDF_LIBS}" CACHE FILEPATH)
+                ATDM_SET_CACHE(TPL_Netcdf_LIBRARIES "$ENV{ATDM_CONFIG_NETCDF_LIBS}"
+                               CACHE FILEPATH)
 
             # SuperLUDist
-            ATDM_SET_CACHE(SuperLUDist_INCLUDE_DIRS "$ENV{ATDM_CONFIG_SUPERLUDIST_INCLUDE_DIRS}" CACHE FILEPATH)
-            ATDM_SET_CACHE(TPL_SuperLUDist_LIBRARIES "$ENV{ATDM_CONFIG_SUPERLUDIST_LIBS}" CACHE FILEPATH)
+            ATDM_SET_CACHE(SuperLUDist_INCLUDE_DIRS
+                           "$ENV{ATDM_CONFIG_SUPERLUDIST_INCLUDE_DIRS}"
+                           CACHE FILEPATH)
+            ATDM_SET_CACHE(TPL_SuperLUDist_LIBRARIES
+                           "$ENV{ATDM_CONFIG_SUPERLUDIST_LIBS}" CACHE FILEPATH)
 
             # many inconsistencies here
             SuperLUDist doens't work using ROOT for includes
             Boost doesn't use libraries but boostlib does
         '''
 
-        core_tpls = {
-                'hdf5'              : 'HDF5',
-                'netcdf-c'          : 'NETCDF',
-                'parallel-netcdf'   : 'PNETCDF',
-                'boost'             : 'BOOST',
-                'cgns'              : 'CGNS',
-                'metis'             : 'METIS',
-                'parmetis'          : 'PARMETIS',
-                'superlu-dist'      : 'SUPERLUDIST',
-                'blas'              : 'BLAS',
-                'lapack'            : 'LAPACK' }
+        # map spack names to Trilinos NAMES
+        core_tpls = {'hdf5':             'HDF5',
+                     'netcdf-c':         'NETCDF',
+                     'parallel-netcdf':  'PNETCDF',
+                     'boost':            'BOOST',
+                     'cgns':             'CGNS',
+                     'metis':            'METIS',
+                     'parmetis':         'PARMETIS',
+                     'superlu-dist':     'SUPERLUDIST',
+                     'blas':             'BLAS',
+                     'lapack':           'LAPACK'}
 
-        libs_required_shared = ['libsci']
         # this is an expensive call
-        # returns a map of spack dependencies and their libraries
-        # if shared=False, then we should use them as-is
-        # if we instead want -L/path -lfoo -lbar
-        # then we we should loop through each list of libraries
-        # and compute the directories and libnames
+        # returns a map of spack dependencies and their libraries if
+        # shared=False, then we should use them as-is if we instead want
+        # -L/path -lfoo -lbar then we we should loop through each list of
+        # libraries and compute the directories and libnames
+
+        # define the configuration to search for
         shared = False
-        wrap_groups=True
+        wrap_groups = True
+        # spack query syntax, key is the spec name, value is a query
+        query_map = {'hdf5':  'hdf5:hl,fortran',
+                     'boost': 'boost:system,program_options'}
+        # return these lirbary names only
+        override_libnames_map = {'boost': ['boost_system',
+                                           'boost_program_options']}
+        # define libraries that can't be static (not robust!)
+        blacklist_static = ['sci_cray']
+
+        # handle if we want shared linkage instead
         if '+tpls_shared' in self.spec:
             shared = True
             wrap_groups = False
-        tpl_libs,tpl_incs,tpl_libdirs=\
-                self._gather_core_tpl_libraries(
-                    shared=shared,
-                    wrap_groups=wrap_groups,
-                    required_shared=libs_required_shared,
-                    core_tpls=core_tpls.keys())
 
+        # make the library find call
+        tpl_libs, tpl_incs, tpl_libdirs = \
+            self._gather_core_tpl_libraries(
+                core_tpls=core_tpls.keys(),
+                query_map=query_map,
+                override_libnames_map=override_libnames_map,
+                blacklist_static=blacklist_static,
+                shared=shared,
+                wrap_groups=wrap_groups)
+
+        # this needs to be better - we generate the lines of the
+        # atdm/environment.sh.  We could probably write this out as format
+        # file, then read in the file as string, apply formatting, and
+        # that's it.
+        # TODO: create template file
+        # replace code here with setting a map
         env_lines = []
-        txt='''
-            # This is an auto-generated file used to mimic the 'source -> configure -> build'
-            # method used by some Trilinos workflows
+        txt = '''
+            # This is an auto-generated file used to mimic the
+            # 'source -> configure -> build' method used by some workflows
+            # including EMPIRE and Trilinos CI at Sandia
             echo "Inside fake env"
             '''
         env_lines.append(dedent(txt))
 
-        # setup our variables
-        # ideally we'd like to module load tpl-exec_space, and have it do
-        # all of this. Currently, spack's module naming isn't making the required modules
-        # alternatively, we could maybe add a meta-moduled, atdm-dev-exec_space... this
-        # would all look much better
-        for spec_name,atdm_name in core_tpls.items():
-            prefix=self.spec[spec_name].prefix
-            # cmake wants semicolon delimited lists
-            inc_dirs=';'.join(tpl_incs[spec_name])
-            libs=';'.join(tpl_libs[spec_name])
+        # config_map = {}
+        # config_lines = []
 
-            #lib_dirs... would need to do something..
-            #lib_names... I wouldn't set this, set libs to -Ldirs;libnames
-            txt=f'''
+        # setup our variables
+        # ideally we'd like to module load tpl-exec_space, and have it do all of
+        # this. Currently, spack's module naming isn't making the required
+        # modules alternatively, we could maybe add a meta-moduled,
+        # atdm-dev-exec_space... this would all look much better
+        for spec_name, atdm_name in core_tpls.items():
+            prefix = self.spec[spec_name].prefix
+            # cmake wants semicolon delimited lists
+            inc_dirs = ';'.join(tpl_incs[spec_name])
+            libs = ';'.join(tpl_libs[spec_name])
+
+            # lib_dirs... would need to do something..
+            # lib_names... I wouldn't set this, set libs to -Ldirs;libnames
+            txt = f'''
             _spack_{atdm_name}_ROOT="{prefix}"
             : "${{{atdm_name}_ROOT:=${{_spack_{atdm_name}_ROOT}}}}"
             unset _spack_{atdm_name}_ROOT
@@ -561,95 +573,114 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
             '''
             env_lines.append(dedent(txt))
 
-        # this sucks - Cray provides bin utils for all CCE, but spack can't understand that
-        # ideally, you could make a package that is aware that it is controlled by the compiler module
-        # but if you module load CCE in that package you are hosed
-        #
+        # this sucks - Cray provides bin utils for all CCE, but spack can't
+        # understand that ideally, you could make a package that is aware that
+        # it is controlled by the compiler module but if you module load CCE in
+        # that package you are hosed
         # I don't know what you are supposed to do..
-        txt='''# yuck
+        txt = '''# yuck
             export BINUTILS_ROOT={bin_utils_root}
             # leaving this off for now... this could be evil
             export ATDM_CONFIG_BINUTILS_LIBS="-L${{BINUTILS_ROOT}}/lib;-lbfd"
-            '''.format(bin_utils_root=os.environ.get('CRAY_BINUTILS_ROOT',''))
+            '''.format(bin_utils_root=os.environ.get('CRAY_BINUTILS_ROOT', ''))
 
         env_lines.append(dedent(txt))
 
         # we've handled libraries, now do the compilers
         # self.compilers.modules contains the loaded compiler modules
         compiler_modules = dict.fromkeys(self.compiler.modules)
+        compiler_modules = list(self.compiler.modules)
+        txt = '''
+            module purge &>/dev/null
+            module load {0}
+            '''.format(' '.join(compiler_modules))
+        env_lines.append(dedent(txt))
 
         # there is a LLNL module for querying micro arch...
         # but we want to use whatever we are targetting via Cray
         # spack should really provide support for module based microarch
         # compiling. e.g., craype-x86-haswell
         if 'CRAY_CPU_TARGET' in os.environ:
-            micro_arch_map = {
-                    'x86-naples': 'ZEN',
-                    'x86-rome'  : 'ZEN2',
-                    'x86-milan' : 'ZEN3'
-                    }
+            micro_arch_map = {'x86-naples': 'ZEN',
+                              'x86-rome':   'ZEN2',
+                              'x86-milan':  'ZEN3'}
+
             # this will throw if the ENV isn't set... so spack better be nice
             # with cray!
-            kokkos_arch=micro_arch_map[os.environ['CRAY_CPU_TARGET']]
-            tty.msg(f"Setting Kokkos_ARCH using CrayPE ... got {kokkos_arch}")
+            kokkos_arch = micro_arch_map[os.environ['CRAY_CPU_TARGET']]
+            tty.msg('Setting Kokkos_ARCH using CrayPE ... got {0}'
+                    ''.format(kokkos_arch))
         else:
-            kokkos_arch=Kokkos.spack_micro_arch_map[self.spec.target.name].upper()
-            tty.msg(f"Setting Kokkos_ARCH using spec.target.name ... got {kokkos_arch}")
+            kokkos_arch = \
+                Kokkos.spack_micro_arch_map[self.spec.target.name].upper()
+            tty.msg('Setting Kokkos_ARCH using spec.target.name ... got {0}'
+                    ''.format(kokkos_arch))
 
         # handle GPU stuff... todo
         # the Cmake stuff will handle turning on exec spaces
         # done via load-env.sh foo-openmp|cuda|serial-stuff
         # we usually specify the kokkos arch in the env script
-        txt=f'''
-            export ATDM_CONFIG_KOKKOS_ARCH="{kokkos_arch}"
-            '''
+        txt = '''
+            export ATDM_CONFIG_KOKKOS_ARCH="{0}"
+            '''.format(kokkos_arch)
         env_lines.append(dedent(txt))
 
-        ci_hostname=self.spec.variants['ci_hostname'].value
-        mpiexec_flags='--cpu-bind=cores;-c;1'
-        mpiexec_np='-n'
+        config_map = {}
+        variants = self.spec.variants
+
+        config_map["ci_hostname"] = variants['ci_hostname'].value
+        config_map["mpiexec_flags"] = '--cpu-bind=cores;-c;1'
+        config_map["mpiexec_np"] = '-n'
         # need to fix this
-        mpiexec='srun'
-        mpicc = self.compiler.cc
-        mpicxx = self.compiler.cxx
-        mpif90 = self.compiler.fc
+        config_map["mpiexec"] = 'srun'
+        config_map["mpicc"] = self.compiler.cc
+        config_map["mpicxx"] = self.compiler.cxx
+        config_map["mpif90"] = self.compiler.fc
 
-        spack_magic='spack_magic'
-        spack_magic_dir=f'/tmp/{spack_magic}'
-        kokkos_node_type=str(self.spec.variants['exec_space'].value).lower()
+        config_map["spack_magic"] = 'spack_magic'
+        config_map["spack_magic_dir"] = '/tmp/{spack_magic}'.format(**config_map)
+        config_map["exec_space"] = str(variants['exec_space'].value).lower()
+        config_map["kokkos_node_type"] = config_map["exec_space"]
+        config_map["atdm_config_trilinos_dir"] = self.prefix
 
-        atdm_config_build_type=self.spec.variants['build_type'].value.lower()
+        config_map["atdm_config_build_type_l"] = variants['build_type'].value.lower()
+        config_map["atdm_config_build_type"] = variants['build_type'].value.upper()
         # this is the weird name from custom-builds.sh
-        atdm_config_compiler=self._get_atdm_compiler_config_name()
+        config_map["atdm_config_compiler"] = self._get_atdm_compiler_config_name()
         # this is the 'build name' givin to load-env
-        atdm_config_build_name=f'{spack_magic}-{atdm_config_compiler}-{atdm_config_build_type.lower()}-{kokkos_node_type.lower()}'
+        config_map["atdm_config_build_name"] = ('{spack_magic}-'
+                                                '{atdm_config_compiler}-'
+                                                '{atdm_config_build_type_l}-'
+                                                '{kokkos_node_type}'
+                                                ''.format(**config_map))
 
-        if self.spec.variants['complex'].value:
-            atdm_config_enable_complex='ON'
-            atdm_config_build_name+='-complex'
+        if variants['complex'].value:
+            config_map["atdm_config_enable_complex"] = 'ON'
+            config_map["atdm_config_build_name"] += '-complex'
         else:
-            atdm_config_enable_complex='OFF'
+            config_map["atdm_config_enable_complex"] = 'OFF'
 
-        if self.spec.variants['shared'].value:
-            atdm_config_build_name+='-shared'
-            atdm_config_build_shared_libs='ON'
+        if variants['shared'].value:
+            config_map["atdm_config_build_name"] += '-shared'
+            config_map["atdm_config_build_shared_libs"] = 'ON'
         else:
-            atdm_config_build_shared_libs='OFF'
+            config_map["atdm_config_build_shared_libs"] = 'OFF'
 
-        if 'openmp' in self.spec.variants['exec_space'].value.lower():
-            atdm_config_use_openmp='ON'
+        if config_map['exec_space'] == 'openmp':
+            config_map["atdm_config_use_openmp"] = 'ON'
         else:
-            atdm_config_use_openmp='OFF'
+            config_map["atdm_config_use_openmp"] = 'OFF'
 
-        if 'cuda' in self.spec.variants['exec_space'].value.lower():
-            atdm_config_use_cuda='ON'
+        if config_map['exec_space'] == 'cuda':
+            config_map["atdm_config_use_cuda"] = 'ON'
         else:
-            atdm_config_use_cuda='OFF'
+            config_map["atdm_config_use_cuda"] = 'OFF'
 
-        txt=f'''
+        txt = '''
             # this is an internal variable that enables the libraries common to both
             # sparc and empire ... it's name predates empire using it
             export ATDM_CONFIG_ENABLE_SPARC_SETTINGS=ON
+            export ATDM_CONFIG_USE_SPARC_TPL_FIND_SETTINGS=OFF
 
             # override the hostnames used... hopefully this helps cdash work
             export ATDM_CONFIG_KNOWN_HOSTNAME={ci_hostname}
@@ -688,7 +719,7 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
             export ATDM_CONFIG_KNOWN_SYSTEM_NAME="{spack_magic}"
             export ATDM_CONFIG_GET_CUSTOM_SYSTEM_INFO_COMPLETED="1"
             export ATDM_CONFIG_SYSTEM_NAME="{spack_magic}"
-            export ATDM_CONFIG_BUILD_TYPE="{atdm_config_build_type.upper()}"
+            export ATDM_CONFIG_BUILD_TYPE="{atdm_config_build_type}"
             export ATDM_CONFIG_JOB_NAME="{atdm_config_build_name}"
             export ATDM_CONFIG_PT_PACKAGES="ON"
             export ATDM_CONFIG_CUSTOM_COMPILER_SET="1"
@@ -697,11 +728,11 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
             export ATDM_CONFIG_CUSTOM_CONFIG_DIR_ARG="{spack_magic_dir}"
             export ATDM_CONFIG_SYSTEM_DIR="{spack_magic_dir}"
             export ATDM_CONFIG_BUILD_NAME="{atdm_config_build_name}"
-            export ATDM_CONFIG_TRILINOS_DIR="{self.stage.source_path}"
+            export ATDM_CONFIG_TRILINOS_DIR="{atdm_config_trilinos_dir}"
             export ATDM_CONFIG_FINISHED_SET_BUILD_OPTIONS="1"
-            export ATDM_CONFIG_NODE_TYPE="{kokkos_node_type.upper()}"
+            export ATDM_CONFIG_NODE_TYPE="{kokkos_node_type}"
             export ATDM_CONFIG_COMPLEX="{atdm_config_enable_complex}"
-            export ATDM_CONFIG_SCRIPT_DIR="{self.stage.source_path}/cmake/std/atdm"
+            export ATDM_CONFIG_SCRIPT_DIR="{atdm_config_trilinos_dir}/cmake/std/atdm"
             export ATDM_CONFIG_SHARED_LIBS="{atdm_config_build_shared_libs}"
 
             #export ATDM_CONFIG_Trilinos_LINK_SEARCH_START_STATIC=ON
@@ -710,11 +741,10 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
 
             # this must be set
             export ATDM_CONFIG_COMPLETED_ENV_SETUP="TRUE"
-        '''
+        '''.format(**config_map)
         env_lines.append(dedent(txt))
 
         return '\n'.join(env_lines)
-
 
     def _write_spack_magic_trilinos_env(self, spack_magic_dir):
         """
@@ -723,43 +753,45 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
                 {spack_env_dir}/environment.sh
         """
 
-        spack_env_file=f'{spack_magic_dir}/environment.sh'
+        spack_env_file = '{0}/environment.sh'.format(spack_magic_dir)
 
         tty.msg("Writing ATDM 'environment'")
-        tty.msg(f"Writing ATDM to: {spack_env_file}")
+        tty.msg("Writing ATDM to: {0}".format(spack_env_file))
 
         with open(spack_env_file, "w") as fptr:
             fptr.write(self._create_spack_atdm_env())
 
     def _source_spack_magic_and_add_env(self, spack_env_dir, spack_env):
 
-        env_new  = {}
-        command = f"bash -c 'source {spack_env_dir}/environment.sh && env'"
-        tty.msg('Sourcing fake ATDM env to get ENV diff...{command}')
+        command = ("bash -c 'source {0}/environment.sh && env'"
+                   "".format(spack_env_dir))
+        tty.msg('Sourcing fake ATDM env to get ENV diff...{0}'
+                ''.format(command))
 
         command = shlex.split(command)
 
-        proc = subprocess.Popen(command, stdout = subprocess.PIPE)
+        proc = subprocess.Popen(command, stdout=subprocess.PIPE)
         for line in proc.stdout:
             (key, _, value) = line.decode().partition("=")
-            value=value.strip()
+            value = value.strip()
             # should we add the var?
             add_value = False
 
-            if re.match('^ATDM_.*$',key):
-                add_value=True
-            elif re.match('^(MPICC|MPICXX|MPIFC)$',key):
-                add_value=True
-            elif re.match('^.*_ROOT$',key):
-                tty.msg(f"=======++++++ ----- <<<< >>>>>> Found a Root {key}")
-                add_value=True
+            if re.match('^ATDM_.*$', key):
+                add_value = True
+            elif re.match('^(MPICC|MPICXX|MPIFC)$', key):
+                add_value = True
+            elif re.match('^.*_ROOT$', key):
+                tty.msg("=======++++++ ----- <<<< >>>>>> Found a Root {0}"
+                        "".format(key))
+                add_value = True
 
             if add_value:
-                print("Got new ENV: {} = {}".format(key,value))
+                print("Got new ENV: {} = {}".format(key, value))
                 os.environ[key] = value
         proc.communicate()
 
-    def _get_true_name_version(self,spec_name):
+    def _get_true_name_version(self, spec_name):
         '''
         Determine the name and version of MPI.
 
@@ -771,8 +803,8 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
         This isn't robust, but it seems to work given the
         current module setup on this machine.
         '''
-        m=self.spec[spec_name].to_node_dict()
-        for n,d in m.items():
+        m = self.spec[spec_name].to_node_dict()
+        for n, d in m.items():
             s_name = n
             s_version = d['version']
             if 'external' in d:
@@ -780,9 +812,9 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
                     for module in d['external']['module']:
                         # the real name of MPI is in the module name..
                         if n in module:
-                            s_name,_,s_version = module.partition('/')
-                            s_name = s_name.replace('_','-')
-        return s_name,s_version
+                            s_name, _, s_version = module.partition('/')
+                            s_name = s_name.replace('_', '-')
+        return s_name, s_version
 
     def _get_compiler_name_version(self):
         '''
@@ -793,107 +825,112 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
         '''
         compiler_name = self.compiler.name
         compiler_version = self.compiler.version
-        return compiler_name,compiler_version
+        return compiler_name, compiler_version
+
+    @run_after('build')
+    def check(self):
+        timeout = '--test-timeout 300'
+        with working_dir(self.build_directory):
+            tty.debug("Preparing to run tests, -j 8 first")
+            ctest('-j 8', timeout, fail_on_error=False)
+            tty.debug("Preparing to rerun-failed tests, -j 4 first")
+            ctest('--rerun-failed', timeout, '-j 4', fail_on_error=False)
+            tty.debug("Preparing to rerun-failed tests, -j 1 first")
+            ctest('-VV', timeout, '--rerun-failed', '-j 1', fail_on_error=False)
 
     def _find_libraries(self,
-            dep_name,
-            shared=False,
-            required_shared=[]):
+                        dep_name,
+                        shared=False,
+                        query_map={},
+                        override_libnames_map={}):
         spec = self.spec
 
-        banner='*'*80
         # fully qualified paths to the libraries
         libs = []
         inc_dirs = []
         lib_dirs = []
         libnames = []
-        query_map = {
-                'hdf5' : 'hdf5:hl,fortran',
-                'boost' : 'boost:system,program_options'
-                }
-
-        override_libnames = {
-                'boost' : ['boost_system','boost_program_options']
-                }
 
         # restrict the spec if needed
         if dep_name in query_map:
             spec_query = query_map[dep_name]
-            package_spec = spec[query_map[dep_name]]
-            #print(f"spec['{spec_query}']")
+            package_spec = spec[spec_query]
+            # print(f"spec['{spec_query}']")
         else:
             package_spec = spec[dep_name]
 
-        #pprint(package_spec.to_node_dict())
+        # pprint(package_spec.to_node_dict())
         # extract the libnames
         try:
-            #print("spec.libs")
-            #pprint(package_spec.libs)
+            # print("spec.libs")
+            # pprint(package_spec.libs)
 
             package_lib_names = package_spec.libs.names
 
-            if dep_name in override_libnames:
-                package_lib_names = override_libnames[dep_name]
+            if dep_name in override_libnames_map:
+                package_lib_names = override_libnames_map[dep_name]
 
-            libnames=[ 'lib' + c for c in package_lib_names ]
+            libnames = ['lib' + c for c in package_lib_names]
 
             # TODO - handle if these are lists or not?
             try:
-                inc_dirs = [ package_spec.prefix.include ]
+                inc_dirs = [package_spec.prefix.include]
             except:
                 pass
             try:
-                lib_dirs = [ package_spec.prefix.lib ]
+                lib_dirs = [package_spec.prefix.lib]
             except:
                 pass
 
-            #print('Got libs.names...')
-            #pprint(libnames)
+            # print('Got libs.names...')
+            # pprint(libnames)
         except spack.error.NoLibrariesError:
             # give up if you get none
-            return libs,inc_dirs,lib_dirs
+            return libs, inc_dirs, lib_dirs
 
         # quit if we got none
         if len(libnames) < 1:
-            return libs,inc_dirs,lib_dirs
+            return libs, inc_dirs, lib_dirs
 
-        txt='''calling find_libraries(
+        txt = '''calling find_libraries(
                 {names},
                 root={root},
                 shared={shared},
                 recursive=True).split()
             '''
-        txt=dedent(txt).format(
-                names=libnames,
-                root=package_spec.prefix,
-                shared=shared)
-        #pprint(txt)
+        txt = dedent(txt).format(names=libnames,
+                                 root=package_spec.prefix,
+                                 shared=shared)
+        # pprint(txt)
 
         libs = str(find_libraries(libnames,
                                   root=package_spec.prefix,
                                   shared=shared,
                                   recursive=True)).split()
-        #pprint(libs)
+        # pprint(libs)
 
-        #print("++++ Getting dependents...")
+        # print("++++ Getting dependents...")
         for n in package_spec.dependencies_dict():
-            #print('++++' + n)
-            #pprint(package_spec[n].to_dict())
-            #print("Calling new find libraries with {}".format(n))
-            new_libs,new_inc_dirs,new_lib_dirs = self._find_libraries(n,shared)
-            #print("Got new libs: {}".format(new_libs))
-            libs+=new_libs
-            inc_dirs+=new_inc_dirs
-            lib_dirs+=new_lib_dirs
-        return libs,inc_dirs,lib_dirs
+            # print('++++' + n)
+            # pprint(package_spec[n].to_dict())
+            # print("Calling new find libraries with {}".format(n))
+            new_libs, new_inc_dirs, new_lib_dirs = self._find_libraries(n, shared)
+            # print("Got new libs: {}".format(new_libs))
+            libs += new_libs
+            inc_dirs += new_inc_dirs
+            lib_dirs += new_lib_dirs
+        return libs, inc_dirs, lib_dirs
 
     def _gather_core_tpl_libraries(self,
                                    core_tpls,
+                                   query_map={},
+                                   override_libnames_map={},
+                                   blacklist_static=[],
                                    shared=False,
-                                   required_shared=[],
                                    wrap_groups=False):
         from pathlib import Path
-        banner='*'*80
+
+        banner = '*' * 80
         libs = {}
         inc_dirs = {}
         lib_dirs = {}
@@ -904,38 +941,46 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
             inc_dirs[tpl] = []
             lib_dirs[tpl] = []
 
-            libs[tpl],inc_dirs[tpl],lib_dirs[tpl] = self._find_libraries(tpl,shared=shared,required_shared=required_shared)
+            libs[tpl], inc_dirs[tpl], lib_dirs[tpl] = \
+                self._find_libraries(tpl,
+                                     shared=shared,
+                                     query_map=query_map,
+                                     override_libnames_map=override_libnames_map)
             # remove duplicate - this is OKAY if you are use a groups
-            inc_dirs[tpl] = list(dict.fromkeys( inc_dirs[tpl] ))
-            lib_dirs[tpl] = list(dict.fromkeys( lib_dirs[tpl] ))
+            inc_dirs[tpl] = list(dict.fromkeys(inc_dirs[tpl]))
+            lib_dirs[tpl] = list(dict.fromkeys(lib_dirs[tpl]))
 
             if wrap_groups and len(libs[tpl]) > 1:
-                libs[tpl] = list(dict.fromkeys( libs[tpl] ))
+                libs[tpl] = list(dict.fromkeys(libs[tpl]))
                 libs[tpl] = ['-Wl,--start-group'] + libs[tpl] + ['-Wl,--end-group']
             # I'd like to handle static/shared better
             # cray requires atleast libsci to be dynamic
             need_fix = False
-            for l in libs[tpl]:
-                if 'sci_cray' in l:
-                    need_fix = True
+            if not shared:
+                for blacklisted in blacklist_static:
+                    if any(blacklisted in l for l in libs[tpl]):
+                        need_fix = True
+                        break
 
             if need_fix:
                 tty.msg(f"Adjusting TPL: {tpl} Making all sci_cray libraries shared if they are static")
-                new_l_prefix = ';'.join([ f'-L{d}' for d in lib_dirs[tpl] ])
+                new_l_prefix = ' '.join([f'-L{d}' for d in lib_dirs[tpl]])
                 new_libs = []
                 for l in libs[tpl]:
-                    if 'sci_cray' in l:
-                        libname = Path(l).name
-                        m = re.match('^lib(?P<name>.*)\.a', libname)
-                        if m:
-                            new_l = m.group('name')
-                            new_l = f'{new_l_prefix};-l{new_l}'
-                            tty.msg(f"{l} => {new_l}")
-                            new_libs.append(new_l)
-                        else:
-                            tty.msg('WTF: matched sci_cray, but failed to match foo.a')
-                            tty.msg(f'   : lib = {l}')
-                            new_libs.append(l)
+                    for blacklisted in blacklist_static:
+                        if blacklisted in l:
+                            libname = Path(l).name
+                            m = re.match(r'^lib(?P<name>.*)\.a', libname)
+                            if m:
+                                new_l = m.group('name')
+                                new_l = f'-l{new_l}'
+                                tty.msg(f"{l} => {new_l}")
+                                new_libs.append(new_l)
+                            else:
+                                tty.msg('WTF: matched {0}, but failed to match lib{1}.a'
+                                        ''.format(blacklisted, libname))
+                                tty.msg(f'   : lib = {l}')
+                                new_libs.append(l)
 
                 libs[tpl] = new_libs
 
@@ -945,4 +990,4 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
 
         print(banner)
 
-        return libs,inc_dirs,lib_dirs
+        return libs, inc_dirs, lib_dirs
