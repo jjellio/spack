@@ -116,8 +116,8 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
     tpl_variant_map = {
         'netcdf-c': {
             'version': '',
-            'variant': '~hdf4~jna'
-                       '+mpi+parallel-netcdf+dap'
+            'variant': '~hdf4~jna~dap'  # disable dap because curl/idn2 is bugged
+                       '+mpi+parallel-netcdf'
                        ' build_type=Release'
             },
         'hdf5': {
