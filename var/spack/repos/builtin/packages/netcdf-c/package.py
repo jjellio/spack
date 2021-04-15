@@ -3,7 +3,12 @@
 #
 # SPDX-License-Identifier: (Apache-2.0 OR MIT)
 
+import inspect
+import os
+import re
+from textwrap import dedent
 from spack import *
+import llnl.util.tty as tty
 
 
 class NetcdfC(AutotoolsPackage):
@@ -183,9 +188,23 @@ class NetcdfC(AutotoolsPackage):
         # used instead.
         hdf5_hl = self.spec['hdf5:hl']
         cppflags.append(hdf5_hl.headers.cpp_flags)
-        ldflags.append(hdf5_hl.libs.search_flags)
+        #ldflags.append(hdf5_hl.libs.search_flags)
+        #if hdf5_hl.satisfies('~shared'):
+        #    libs.append(hdf5_hl.libs.link_flags)
+        #  libs,inc_dirs,lib_dirs
         if hdf5_hl.satisfies('~shared'):
-            libs.append(hdf5_hl.libs.link_flags)
+            _libs = {}
+            _inc = {}
+            _ldirs = {}
+            _libs,_inc,_ldirs = self._gather_core_tpl_libraries(['hdf5'],
+                                            query_map={'hdf5' : 'hdf5:hl,fortran'},
+                                            blacklist_static=['sci_cray'],
+                                            shared=False,
+                                            wrap_groups=True);
+            libs += _libs['hdf5']
+            ldflags += ['-L{0}'.format(l) for l in _ldirs['hdf5']] + ['-Wl,--allow-multiple-definition']
+        else:
+            ldflags.append(hdf5_hl.libs.search_flags)
 
         if '+parallel-netcdf' in self.spec:
             config_args.append('--enable-pnetcdf')
@@ -238,3 +257,162 @@ class NetcdfC(AutotoolsPackage):
         return find_libraries(
             'libnetcdf', root=self.prefix, shared=shared, recursive=True
         )
+
+    def _find_libraries(self,
+            dep_name,
+            shared=False,
+            required_shared=[],
+            query_map={},
+            override_libnames_map={}):
+        spec = self.spec
+
+        banner='*'*80
+        # fully qualified paths to the libraries
+        libs = []
+        inc_dirs = []
+        lib_dirs = []
+        libnames = []
+
+        # restrict the spec if needed
+        if dep_name in query_map:
+            spec_query = query_map[dep_name]
+            package_spec = spec[query_map[dep_name]]
+            #print(f"spec['{spec_query}']")
+        else:
+            package_spec = spec[dep_name]
+
+        #pprint(package_spec.to_node_dict())
+        # extract the libnames
+        try:
+            #print("spec.libs")
+            #pprint(package_spec.libs)
+
+            package_lib_names = package_spec.libs.names
+
+            if dep_name in override_libnames_map:
+                package_lib_names = override_libnames_map[dep_name]
+
+            libnames=[ 'lib' + c for c in package_lib_names ]
+
+            # TODO - handle if these are lists or not?
+            try:
+                inc_dirs = [ package_spec.prefix.include ]
+            except:
+                pass
+            try:
+                lib_dirs = [ package_spec.prefix.lib ]
+            except:
+                pass
+
+            #print('Got libs.names...')
+            #pprint(libnames)
+        except spack.error.NoLibrariesError:
+            # give up if you get none
+            return libs,inc_dirs,lib_dirs
+
+        # quit if we got none
+        if len(libnames) < 1:
+            return libs,inc_dirs,lib_dirs
+
+        txt='''calling find_libraries(
+                {names},
+                root={root},
+                shared={shared},
+                recursive=True).split()
+            '''
+        txt=dedent(txt).format(
+                names=libnames,
+                root=package_spec.prefix,
+                shared=shared)
+        #pprint(txt)
+
+        libs = str(find_libraries(libnames,
+                                  root=package_spec.prefix,
+                                  shared=shared,
+                                  recursive=True)).split()
+        #pprint(libs)
+
+        #print("++++ Getting dependents...")
+        for n in package_spec.dependencies_dict():
+            #print('++++' + n)
+            #pprint(package_spec[n].to_dict())
+            #print("Calling new find libraries with {}".format(n))
+            new_libs,new_inc_dirs,new_lib_dirs = self._find_libraries(n,shared)
+            #print("Got new libs: {}".format(new_libs))
+            libs+=new_libs
+            inc_dirs+=new_inc_dirs
+            lib_dirs+=new_lib_dirs
+        return libs,inc_dirs,lib_dirs
+
+    def _gather_core_tpl_libraries(self,
+                                   core_tpls,
+                                   query_map={},
+                                   override_libnames_map = {},
+                                   blacklist_static = [],
+                                   shared=False,
+                                   required_shared=[],
+                                   wrap_groups=False):
+        from pathlib import Path
+
+        banner='*'*80
+        libs = {}
+        inc_dirs = {}
+        lib_dirs = {}
+        for tpl in core_tpls:
+            print(banner)
+            print("Calling new find libraries")
+            libs[tpl] = []
+            inc_dirs[tpl] = []
+            lib_dirs[tpl] = []
+
+            libs[tpl],inc_dirs[tpl],lib_dirs[tpl] = \
+                self._find_libraries(tpl,
+                                     shared=shared,
+                                     required_shared=required_shared,
+                                     query_map=query_map,
+                                     override_libnames_map=override_libnames_map)
+            # remove duplicate - this is OKAY if you are use a groups
+            inc_dirs[tpl] = list(dict.fromkeys( inc_dirs[tpl] ))
+            lib_dirs[tpl] = list(dict.fromkeys( lib_dirs[tpl] ))
+
+            if wrap_groups and len(libs[tpl]) > 1:
+                libs[tpl] = list(dict.fromkeys( libs[tpl] ))
+                libs[tpl] = ['-Wl,--start-group'] + libs[tpl] + ['-Wl,--end-group']
+            # I'd like to handle static/shared better
+            # cray requires atleast libsci to be dynamic
+            need_fix = False
+            if not shared:
+                for blacklisted in blacklist_static:
+                    if any(blacklisted in l for l in libs[tpl]):
+                        need_fix = True
+                        break
+
+            if need_fix:
+                tty.msg(f"Adjusting TPL: {tpl} Making all sci_cray libraries shared if they are static")
+                new_l_prefix = ' '.join([ f'-L{d}' for d in lib_dirs[tpl] ])
+                new_libs = []
+                for l in libs[tpl]:
+                    for blacklisted in blacklist_static:
+                        if blacklisted in l:
+                            libname = Path(l).name
+                            m = re.match('^lib(?P<name>.*)\.a', libname)
+                            if m:
+                                new_l = m.group('name')
+                                new_l = f'-l{new_l}'
+                                tty.msg(f"{l} => {new_l}")
+                                new_libs.append(new_l)
+                            else:
+                                tty.msg('WTF: matched {0}, but failed to match lib{1}.a'.format(blacklisted,libname))
+                                tty.msg(f'   : lib = {l}')
+                                new_libs.append(l)
+
+                libs[tpl] = new_libs
+
+            print("libs = {}".format(libs[tpl]))
+            print("inc_dirs = {}".format(inc_dirs[tpl]))
+            print("lib_dirs = {}".format(lib_dirs[tpl]))
+
+        print(banner)
+
+        return libs,inc_dirs,lib_dirs
+
