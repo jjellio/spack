@@ -1,0 +1,1808 @@
+From 28a186045fdde3484a7c09b7093987c71cd6897e Mon Sep 17 00:00:00 2001
+From: James Elliott <jjellio@sandia.gov>
+Date: Fri, 22 Jan 2021 14:23:31 -0700
+Subject: [PATCH 01/16] draft merge of wrapper tools for develop
+
+---
+ .../build_stats/BuildStatsWrappers.cmake      |  32 +++
+ commonTools/build_stats/wrapper/NMParser.py   |   3 +-
+ .../wrapper/WrapperCommandLineParser.py       |  44 ++-
+ .../build_stats/wrapper/WrapperOpTimer.py     | 267 +++++++++---------
+ .../build_stats/wrapper/magic_wrapper.py      |   2 +-
+ 5 files changed, 200 insertions(+), 148 deletions(-)
+
+diff --git a/commonTools/build_stats/BuildStatsWrappers.cmake b/commonTools/build_stats/BuildStatsWrappers.cmake
+index 517382159398..90980597d6d6 100644
+--- a/commonTools/build_stats/BuildStatsWrappers.cmake
++++ b/commonTools/build_stats/BuildStatsWrappers.cmake
+@@ -40,6 +40,10 @@ function(generate_build_stats_wrappers)
+       generate_build_stats_wrapper_for_lang(Fortran)
+     endif()
+ 
++    generate_build_stats_wrapper_for_op(LD)
++    generate_build_stats_wrapper_for_op(AR)
++    generate_build_stats_wrapper_for_op(RANLIB)
++
+     set(gather_build_status "${${PROJECT_NAME}_BINARY_DIR}/gather_build_stats.sh")
+     configure_file("${BUILD_STATS_SRC_DIR}/gather_build_stats.sh"
+       "${gather_build_status}" COPYONLY)
+@@ -47,6 +51,34 @@ function(generate_build_stats_wrappers)
+ 
+ endfunction()
+ 
++# Generate the build stats compiler wrapper for a ar/ld/ranlib
++#
++function(generate_build_stats_wrapper_for_op op_name)
++
++  string(TOLOWER "${op_name}" op_lc)
++  set(compiler_wrapper
++    "${${PROJECT_NAME}_BINARY_DIR}/build_stat_${op_lc}_wrapper.sh")
++
++  # Override the compiler with the wrapper but remember the original compiler
++  if ("${CMAKE_${op_name}_ORIG}" STREQUAL "")
++    set(CMAKE_${op_name}_ORIG "${op_lc}"
++      CACHE FILEPATH "Original non-wrappeed ${op_name}" FORCE )
++    set(CMAKE_${op_name} "${compiler_wrapper}"
++      CACHE FILEPATH "Overwritten build stats ${op_name} compiler wrapper" FORCE )
++  endif()
++
++  message("-- " "Generate build stats compiler wrapper for ${op_name}")
++  set(BUILD_STAT_COMPILER_WRAPPER_INNER_COMPILER "${CMAKE_${op_name}_ORIG}")
++  configure_file("${BUILD_STATS_SRC_DIR}/build_stat_lang_wrapper.sh.in"
++    "${compiler_wrapper}" @ONLY)
++  print_var(CMAKE_${op_name})
++
++  # Use the orginal compiler for the installed <XXX>Config.cmake files
++  set(CMAKE_${op_name}_COMPILER_FOR_CONFIG_FILE_INSTALL_DIR
++    "${CMAKE_${op_name}_ORIG}" CACHE INTERNAL "")
++  print_var(CMAKE_${op_name}_COMPILER_FOR_CONFIG_FILE_INSTALL_DIR)
++
++endfunction()
+ 
+ # Get the var BASE_BUILD_DIR_FOR_PYTHON
+ #
+diff --git a/commonTools/build_stats/wrapper/NMParser.py b/commonTools/build_stats/wrapper/NMParser.py
+index 7e00c33549e4..91e69b0a5ce0 100644
+--- a/commonTools/build_stats/wrapper/NMParser.py
++++ b/commonTools/build_stats/wrapper/NMParser.py
+@@ -55,7 +55,8 @@ def parse_object(filename):
+       See nm_re_type_expr, nm_re_str, and nm_re in the static fields of this class
+     """
+     p = subprocess.Popen(['nm', '-aS', filename],
+-                         stdout=subprocess.PIPE)
++                         stdout=subprocess.PIPE,
++                         stderr=subprocess.DEVNULL)
+     output = p.communicate()[0]
+ 
+     nm_counts = dict()
+diff --git a/commonTools/build_stats/wrapper/WrapperCommandLineParser.py b/commonTools/build_stats/wrapper/WrapperCommandLineParser.py
+index a8c0a1ae1119..7ba83870540b 100644
+--- a/commonTools/build_stats/wrapper/WrapperCommandLineParser.py
++++ b/commonTools/build_stats/wrapper/WrapperCommandLineParser.py
+@@ -40,6 +40,34 @@ def lcl_print(self):
+                   op=self.op,
+                   print_csv_banner=self.print_csv_banner)
+ 
++  def parse_cmdline_arg_helper(self, cmdline_args):
++    
++    # we want to do something different for ar, ranlib, or ld.*
++    # these commands do not necessarily have a good 'output' arg denoted by -o
++    # first try to find -o, if that passes then use it.
++    # if not, then do something special based on ar/ranlib/ld.*
++
++    # find the output arg (will raise an exception if not found)
++    # we use -o blah.o or -o /path/to/blah.o or none at all
++    try:
++      output_idx = cmdline_args.index('-o')
++      self.op_output_file = cmdline_args[output_idx+1]
++      self.output_stats_file = self.op_output_file + '.' + self.output_stats_file
++  
++      return
++
++    except:
++      pass
++
++    # we failed -o, so try op specific stuff
++    if self.short_op.endswith('ar') or self.short_op.endswith('ranlib'):
++      for arg in cmdline_args:
++        if arg.endswith('.a'):
++          self.output_stats_file = arg + '.' + self.output_stats_file
++          return
++      # we hit this if we can't find a .a
++      return
++
+ 
+   def parse_cmdline_args(self, cmdline_args):
+     base_build_dir_arg_prefix = '----base-build-dir='
+@@ -59,19 +87,13 @@ def parse_cmdline_args(self, cmdline_args):
+         self.print_csv_banner=True
+       elif wrapper_arg.startswith(wrapper_op_arg_prefix):
+         self.op = wrapper_arg.split('=', 1)[1]
+-        # find the output arg (will raise an exception if not found)
+-        # we use -o blah.o or -o /path/to/blah.o or none at all
++
+         # we name the output as: blah.o.op.timing
+         # this will result in blah.ar.timing, blah.mpicc.timing blah.ld.timing...
+-        short_op = os.path.basename(self.op)
+-        output_stats_file_suffix = short_op + '.timing'
+-        try:
+-          output_idx = cmdline_args.index('-o')
+-          self.op_output_file = cmdline_args[output_idx+1]
+-          self.output_stats_file = self.op_output_file + '.' + output_stats_file_suffix
+-          # ToDo: The above needs to be made to work for ar as well!
+-        except:
+-          pass
++        self.short_op = os.path.basename(self.op)
++        self.output_stats_file = short_op + '.timing'
++
++        self.parse_cmdline_arg_helper(cmdline_args)
+ 
+       else:
+         raise Exception('unparseable arguments')
+diff --git a/commonTools/build_stats/wrapper/WrapperOpTimer.py b/commonTools/build_stats/wrapper/WrapperOpTimer.py
+index 86ba025dc405..c8e48daf5cfa 100644
+--- a/commonTools/build_stats/wrapper/WrapperOpTimer.py
++++ b/commonTools/build_stats/wrapper/WrapperOpTimer.py
+@@ -2,144 +2,136 @@
+ import csv
+ import os
+ 
+-#
+-# Data for this WrapperOpTimer module
+-#
+-
+-usr_bin_time_csv_map = {
+-  "E":
+-    "elapsed_real_time_fmt",
+-  "e":
+-    "elapsed_real_time_sec",
+-  "S":
+-    "cpu_sec_kernel_mode",
+-  "U":
+-    "cpu_sec_user_mode",
+-  "P":
+-    "perc_cpu_used",
+-  "M":
+-    "max_resident_size_Kb",
+-  "t":
+-    "avg_resident_size_Kb",
+-  "K":
+-    "avg_total_memory_used_Kb",
+-  "D":
+-    "avg_size_unshared_data_area_Kb",
+-  "p":
+-    "avg_size_unshared_stack_area_Kb",
+-  "X":
+-    "avg_size_unshared_text_area_Kb",
+-  "Z":
+-    'page_size_bytes',
+-  "F":
+-    "num_major_page_faults",
+-  "R":
+-    "num_minor_page_faults",
+-  "W":
+-    "num_swapped",
+-  "c":
+-    "num_involuntary_context_switch",
+-  "w":
+-    "num_waits",
+-  "I":
+-    "num_filesystem_inputs",
+-  "O":
+-    "num_filesystem_outputs",
+-  "r":
+-    "num_socket_msg_recv",
+-  "s":
+-    "num_socket_msg_sent",
+-  "k":
+-    "num_signals",
+-  "x":
+-    "exit_status",
+-}
+-
+-usr_bin_time_desc_map = {
+-  "E":
+-    "Elapsed real time ([h:]m:s)",
+-  "e":
+-    "Elapsed real time (s)",
+-  "S":
+-    "Total number of CPU-seconds that the process spent in kernel mode",
+-  "U":
+-    "Total number of CPU-seconds that the process spent in user mode",
+-  "P":
+-    "Percentage of the CPU that this job got",
+-  "M":
+-    "Maximum resident set size of the process during its lifetime (Kb)",
+-  "t":
+-    "(Not in tcsh.) Average resident set size of the process (Kb)",
+-  "K":
+-    "Average total (data+stack+text) memory use of the process (Kb)",
+-  "D":
+-    "Average size of unshared data area (Kb)",
+-  "p":
+-    "Average size of unshared stack space (Kb)",
+-  "X":
+-    "Average size of shared text space (Kb)",
+-  "Z":
+-    "System page size (bytes)",
+-  "F":
+-    "Number of major page faults",
+-  "R":
+-    "Number of minor or recoverable page faults",
+-  "W":
+-    "Number of times the process was swapped out of main memory",
+-  "c":
+-    "Number of times the process was context-switched involuntarily",
+-  "w":
+-    "Number of waits",
+-  "I":
+-    "Number of file system inputs by the process",
+-  "O":
+-    "Number of file system outputs by the process",
+-  "r":
+-    "Number of socket messages received by the process",
+-  "s":
+-    "Number of socket messages sent by the process",
+-  "k":
+-    "Number of signals delivered to the process",
+-  "x":
+-    "(Not in tcsh.) Exit status of the command",
+-}
+-
+-default_fields = [
+-  "e",
+-  "M",
+-  "K",
+-  "D",
+-  "X",
+-  "F",
+-  "R",
+-  "W",
+-  "w",
+-  "c",
+-  "S",
+-  "U",
+-  "P",
+-  "I",
+-  "O",
+-  "r",
+-  "s",
+-  "k",
+-  "x",
+-  ]
+-
+-field_header_full = \
+-  ','.join([ usr_bin_time_csv_map[f] \
+-    for f in default_fields ])
+-field_header_short = ','.join(default_fields)
+-field_arg = '--format=' + field_header_full + '\n' + \
+-  ','.join([ '%{}'.format(f) for f in default_fields] )
+-
+-
+-#
+-# Class WrapperOpTimer
+-#
++def get_full_header(fields_list,full_header_map):
++  return ','.join([ full_header_map[f] for f in fields_list ])
+ 
+ class WrapperOpTimer:
+ 
++# the values are
++  usr_bin_time_csv_map = {
++    "E":
++      "elapsed_real_time_fmt",
++    "e":
++      "elapsed_real_time_sec",
++    "S":
++      "cpu_sec_kernel_mode",
++    "U":
++      "cpu_sec_user_mode",
++    "P":
++      "perc_cpu_used",
++    "M":
++      "max_resident_size_Kb",
++    "t":
++      "avg_resident_size_Kb",
++    "K":
++      "avg_total_memory_used_Kb",
++    "D":
++      "avg_size_unshared_data_area_Kb",
++    "p":
++      "avg_size_unshared_stack_area_Kb",
++    "X":
++      "avg_size_unshared_text_area_Kb",
++    "Z":
++      'page_size_bytes',
++    "F":
++      "num_major_page_faults",
++    "R":
++      "num_minor_page_faults",
++    "W":
++      "num_swapped",
++    "c":
++      "num_involuntary_context_switch",
++    "w":
++      "num_waits",
++    "I":
++      "num_filesystem_inputs",
++    "O":
++      "num_filesystem_outputs",
++    "r":
++      "num_socket_msg_recv",
++    "s":
++      "num_socket_msg_sent",
++    "k":
++      "num_signals",
++    "x":
++      "exit_status",
++  }
++
++  usr_bin_time_desc_map = {
++    "E":
++      "Elapsed real time ([h:]m:s)",
++    "e":
++      "Elapsed real time (s)",
++    "S":
++      "Total number of CPU-seconds that the process spent in kernel mode",
++    "U":
++      "Total number of CPU-seconds that the process spent in user mode",
++    "P":
++      "Percentage of the CPU that this job got",
++    "M":
++      "Maximum resident set size of the process during its lifetime (Kb)",
++    "t":
++      "(Not in tcsh.) Average resident set size of the process (Kb)",
++    "K":
++      "Average total (data+stack+text) memory use of the process (Kb)",
++    "D":
++      "Average size of unshared data area (Kb)",
++    "p":
++      "Average size of unshared stack space (Kb)",
++    "X":
++      "Average size of shared text space (Kb)",
++    "Z":
++      "System page size (bytes)",
++    "F":
++      "Number of major page faults",
++    "R":
++      "Number of minor or recoverable page faults",
++    "W":
++      "Number of times the process was swapped out of main memory",
++    "c":
++      "Number of times the process was context-switched involuntarily",
++    "w":
++      "Number of waits",
++    "I":
++      "Number of file system inputs by the process",
++    "O":
++      "Number of file system outputs by the process",
++    "r":
++      "Number of socket messages received by the process",
++    "s":
++      "Number of socket messages sent by the process",
++    "k":
++      "Number of signals delivered to the process",
++    "x":
++      "(Not in tcsh.) Exit status of the command",
++  }
++
++  default_fields = [
++    "e",
++    "M",
++    "K",
++    "D",
++    "X",
++    "F",
++    "R",
++    "W",
++    "w",
++    "c",
++    "S",
++    "U",
++    "P",
++    "I",
++    "O",
++    "r",
++    "s",
++    "k",
++    "x",
++    ]
++
++  field_header_full = get_full_header(default_fields, usr_bin_time_csv_map) #','.join([ WrapperOpTimer.usr_bin_time_csv_map[f] for f in default_fields ])
++  field_header_short = ','.join(default_fields)
++  field_arg = '--format=' + field_header_full + '\n' + ','.join([ '%{}'.format(f) for f in default_fields] )
++
+   @staticmethod
+   def time_op(op,
+               op_output_file,
+@@ -149,6 +141,11 @@ def time_op(op,
+     """
+       evaluate 'op' with 'op_args', and gather stats into output_stats_file
+     """
++    if os.path.exists(output_stats_file) and os.path.getsize(output_stats_file) > 0:
++      print(f"WARNING: File {output_stats_file} exists and will be overwritten")
++      print(op)
++      print(op_args)
++
+     cmd = [
+             '/usr/bin/time',
+             # '--append',
+diff --git a/commonTools/build_stats/wrapper/magic_wrapper.py b/commonTools/build_stats/wrapper/magic_wrapper.py
+index fec04c14c355..8ce9e19802df 100755
+--- a/commonTools/build_stats/wrapper/magic_wrapper.py
++++ b/commonTools/build_stats/wrapper/magic_wrapper.py
+@@ -1,4 +1,4 @@
+-#!/usr/bin/env python
++#!/usr/bin/env python3
+ '''
+ 
+ Note:
+
+From c0e7a71778a84d8508e518f931977c5a712f1e5b Mon Sep 17 00:00:00 2001
+From: James Elliott <jjellio@sandia.gov>
+Date: Mon, 25 Jan 2021 19:39:49 -0700
+Subject: [PATCH 02/16] Add a generic function for creating the wrappers
+
+This adds a function that generates both AR, LD, RANLIB, and Compiler
+wrappers. The function ends up being a modified version of the existing.
+Effectively, it only needs to change the Cmake variables it sets.
+
+Also add quotes around the bash variable in the sh.in file
+---
+ .../build_stats/BuildStatsWrappers.cmake      | 29 +++++++++++--------
+ .../build_stats/build_stat_lang_wrapper.sh.in |  2 +-
+ 2 files changed, 18 insertions(+), 13 deletions(-)
+
+diff --git a/commonTools/build_stats/BuildStatsWrappers.cmake b/commonTools/build_stats/BuildStatsWrappers.cmake
+index 90980597d6d6..9759991d65e1 100644
+--- a/commonTools/build_stats/BuildStatsWrappers.cmake
++++ b/commonTools/build_stats/BuildStatsWrappers.cmake
+@@ -40,9 +40,9 @@ function(generate_build_stats_wrappers)
+       generate_build_stats_wrapper_for_lang(Fortran)
+     endif()
+ 
+-    generate_build_stats_wrapper_for_op(LD)
+-    generate_build_stats_wrapper_for_op(AR)
+-    generate_build_stats_wrapper_for_op(RANLIB)
++    generate_build_stats_wrapper_for_op(LD "CMAKE_LD")
++    generate_build_stats_wrapper_for_op(AR "CMAKE_AR")
++    generate_build_stats_wrapper_for_op(RANLIB "CMAKE_RANLIB")
+ 
+     set(gather_build_status "${${PROJECT_NAME}_BINARY_DIR}/gather_build_stats.sh")
+     configure_file("${BUILD_STATS_SRC_DIR}/gather_build_stats.sh"
+@@ -53,30 +53,34 @@ endfunction()
+ 
+ # Generate the build stats compiler wrapper for a ar/ld/ranlib
+ #
+-function(generate_build_stats_wrapper_for_op op_name)
++# the only difference between this and lang, is setting the proper
++# Cmake variable name, e.g., CMAKE_LANG_COMPILER  vs CMAKE_OP
++# we can resolve this by taking in name of the variable to set
++function(generate_build_stats_wrapper_for_op op_name variable_to_set)
+ 
+   string(TOLOWER "${op_name}" op_lc)
+   set(compiler_wrapper
+     "${${PROJECT_NAME}_BINARY_DIR}/build_stat_${op_lc}_wrapper.sh")
+ 
+   # Override the compiler with the wrapper but remember the original compiler
+-  if ("${CMAKE_${op_name}_ORIG}" STREQUAL "")
+-    set(CMAKE_${op_name}_ORIG "${op_lc}"
++  if ("${${variable_to_set}_ORIG}" STREQUAL "")
++    set(${variable_to_set}_ORIG "${op_lc}"
+       CACHE FILEPATH "Original non-wrappeed ${op_name}" FORCE )
+-    set(CMAKE_${op_name} "${compiler_wrapper}"
++    set(${variable_to_set} "${compiler_wrapper}"
+       CACHE FILEPATH "Overwritten build stats ${op_name} compiler wrapper" FORCE )
+   endif()
+ 
+   message("-- " "Generate build stats compiler wrapper for ${op_name}")
+-  set(BUILD_STAT_COMPILER_WRAPPER_INNER_COMPILER "${CMAKE_${op_name}_ORIG}")
++  set(BUILD_STAT_COMPILER_WRAPPER_INNER_COMPILER "${${variable_to_set}_ORIG}")
+   configure_file("${BUILD_STATS_SRC_DIR}/build_stat_lang_wrapper.sh.in"
+     "${compiler_wrapper}" @ONLY)
+-  print_var(CMAKE_${op_name})
++  print_var(${variable_to_set})
+ 
+   # Use the orginal compiler for the installed <XXX>Config.cmake files
+-  set(CMAKE_${op_name}_COMPILER_FOR_CONFIG_FILE_INSTALL_DIR
+-    "${CMAKE_${op_name}_ORIG}" CACHE INTERNAL "")
+-  print_var(CMAKE_${op_name}_COMPILER_FOR_CONFIG_FILE_INSTALL_DIR)
++  # doubt this works w/AR/LD/RANLIB
++  set(${variable_to_set}_COMPILER_FOR_CONFIG_FILE_INSTALL_DIR
++    "${${variable_to_set}_ORIG}" CACHE INTERNAL "")
++  print_var(${variable_to_set}_COMPILER_FOR_CONFIG_FILE_INSTALL_DIR)
+ 
+ endfunction()
+ 
+@@ -89,6 +93,7 @@ macro(get_base_build_dir_for_python)
+     WORKING_DIRECTORY ${PROJECT_BINARY_DIR}
+     OUTPUT_VARIABLE BASE_BUILD_DIR_FOR_PYTHON
+     OUTPUT_STRIP_TRAILING_WHITESPACE)
++  print_var(BASE_BUILD_DIR_FOR_PYTHON)
+ endmacro()
+ # NOTE: We need this function to get the value of os.getcwd() from Python so
+ # that it matches the value returned inside of magic_wapper.py.  The issue is
+diff --git a/commonTools/build_stats/build_stat_lang_wrapper.sh.in b/commonTools/build_stats/build_stat_lang_wrapper.sh.in
+index c516503ad387..530a4514526c 100755
+--- a/commonTools/build_stats/build_stat_lang_wrapper.sh.in
++++ b/commonTools/build_stats/build_stat_lang_wrapper.sh.in
+@@ -1,6 +1,6 @@
+ #!/bin/bash
+ cmd="@BUILD_STAT_COMPILER_WRAPPER_INNER_COMPILER@"
+-base_build_dir=@BASE_BUILD_DIR_FOR_PYTHON@
++base_build_dir="@BASE_BUILD_DIR_FOR_PYTHON@"
+ if [ "${CMAKE_IS_IN_CONFIGURE_MODE}" == "1" ]; then
+   ${cmd} "$@"
+ else
+
+From e30e67954de56912fbb3a4e00daf2f92b3c70842 Mon Sep 17 00:00:00 2001
+From: James Elliott <jjellio@sandia.gov>
+Date: Mon, 25 Jan 2021 19:42:02 -0700
+Subject: [PATCH 03/16] fix a scoping issue that slipped in when variables were
+ moved into a class
+
+Add a field with 'short op' (ar, ranlib, mpicc,...). This may help
+explain what generated a line the in the CSV file.
+
+TODO: CSV files probably should be persistent between compiles. The
+reason being that you may touch a CXX file twice (and you do touch
+archive files twice- first with ar then ranlib). As is, if a CXX file is
+compiled twice you will overwrite whatever was previously in the CSV.
+This use case won't happen (or shouldn't) in current Trilinos, but could
+when you use link time optimizers.
+---
+ commonTools/build_stats/wrapper/WrapperOpTimer.py | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/commonTools/build_stats/wrapper/WrapperOpTimer.py b/commonTools/build_stats/wrapper/WrapperOpTimer.py
+index c8e48daf5cfa..d2906d35ae25 100644
+--- a/commonTools/build_stats/wrapper/WrapperOpTimer.py
++++ b/commonTools/build_stats/wrapper/WrapperOpTimer.py
+@@ -145,12 +145,13 @@ def time_op(op,
+       print(f"WARNING: File {output_stats_file} exists and will be overwritten")
+       print(op)
+       print(op_args)
++      print(op_output_file)
+ 
+     cmd = [
+             '/usr/bin/time',
+             # '--append',
+             '--output=' + output_stats_file,
+-            field_arg,
++            WrapperOpTimer.field_arg,
+            op ] + op_args
+ 
+     # print(' '.join(cmd))
+@@ -179,6 +180,9 @@ def time_op(op,
+     # FileSize
+     csv_row['FileSize'] = WrapperOpTimer.get_file_size(op_output_file)
+ 
++    # add a field with the short op
++    csv_row['op'] = os.path.basename(op)
++
+     # FileName
+     if base_build_dir:
+       abs_base_build_dir = os.path.abspath(base_build_dir)
+
+From cdf85c7c8fe7211a1c8c0fec1117e574532c675d Mon Sep 17 00:00:00 2001
+From: James Elliott <jjellio@sandia.gov>
+Date: Mon, 25 Jan 2021 19:45:32 -0700
+Subject: [PATCH 04/16] fix a scoping issue that slipped in
+
+It is convient to 'raise' an exception thrown in the commandline parser
+for debugging, so I left a commented out 'raise' before the exit(0)
+command
+---
+ .../build_stats/wrapper/WrapperCommandLineParser.py      | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/commonTools/build_stats/wrapper/WrapperCommandLineParser.py b/commonTools/build_stats/wrapper/WrapperCommandLineParser.py
+index 7ba83870540b..a89f39ab2ca5 100644
+--- a/commonTools/build_stats/wrapper/WrapperCommandLineParser.py
++++ b/commonTools/build_stats/wrapper/WrapperCommandLineParser.py
+@@ -14,6 +14,7 @@ def __init__(self, cmdline_args):
+     self.op_output_file = ''
+     # if we perform an operation this is it
+     self.op = ''
++    self.short_op = ''
+     # whether to gather and print a csv_banner
+     self.print_csv_banner = False
+     # whatever the op's args should be
+@@ -63,6 +64,7 @@ def parse_cmdline_arg_helper(self, cmdline_args):
+     if self.short_op.endswith('ar') or self.short_op.endswith('ranlib'):
+       for arg in cmdline_args:
+         if arg.endswith('.a'):
++          self.op_output_file = arg
+           self.output_stats_file = arg + '.' + self.output_stats_file
+           return
+       # we hit this if we can't find a .a
+@@ -91,7 +93,7 @@ def parse_cmdline_args(self, cmdline_args):
+         # we name the output as: blah.o.op.timing
+         # this will result in blah.ar.timing, blah.mpicc.timing blah.ld.timing...
+         self.short_op = os.path.basename(self.op)
+-        self.output_stats_file = short_op + '.timing'
++        self.output_stats_file = self.short_op + '.timing'
+ 
+         self.parse_cmdline_arg_helper(cmdline_args)
+ 
+@@ -101,7 +103,9 @@ def parse_cmdline_args(self, cmdline_args):
+       # Remove the first wrapper_arg_idx+1 args (script name + wrapper args)
+       self.op_args = cmdline_args[wrapper_arg_idx+1:]
+ 
+-    except:
++    except Exception as e:
++      print("Got an error parsing the command line in the compiler wrapper python script")
++      print(e)
+       # any error and we give up
+       help_msg = ["Compiler wrapper:",
+                   "  Usage: wrapper [---base-build-dir=<dir>] ----op=<compiler> [args] | ----get_header",
+@@ -117,5 +121,6 @@ def parse_cmdline_args(self, cmdline_args):
+                   "  statistics will be written to <output>.timing",
+                   ]
+       print('\n'.join(help_msg))
++      #raise
+       sys.exit(0)
+ 
+
+From ece1032de8d51e355e08fca2df911b2055a09845 Mon Sep 17 00:00:00 2001
+From: "Roscoe A. Bartlett" <rabartl@sandia.gov>
+Date: Tue, 26 Jan 2021 09:58:34 -0700
+Subject: [PATCH 05/16] Fix bug in warning print out for overwrite of stats
+ file (#7376)
+
+This was tested with the Trilinos PR gcc_7.2.0_debug build with existing build
+objects and a rebuild over existing object files (and existing *.timing
+files).
+---
+ commonTools/build_stats/wrapper/WrapperOpTimer.py | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/commonTools/build_stats/wrapper/WrapperOpTimer.py b/commonTools/build_stats/wrapper/WrapperOpTimer.py
+index d2906d35ae25..3ddc03523009 100644
+--- a/commonTools/build_stats/wrapper/WrapperOpTimer.py
++++ b/commonTools/build_stats/wrapper/WrapperOpTimer.py
+@@ -142,10 +142,10 @@ def time_op(op,
+       evaluate 'op' with 'op_args', and gather stats into output_stats_file
+     """
+     if os.path.exists(output_stats_file) and os.path.getsize(output_stats_file) > 0:
+-      print(f"WARNING: File {output_stats_file} exists and will be overwritten")
+-      print(op)
+-      print(op_args)
+-      print(op_output_file)
++      print("WARNING: File '"+output_stats_file+"' exists and will be overwritten")
++      print("op='"+op+"'")
++      print("op_args='"+str(op_args)+"'")
++      print("op_output_file='"+op_output_file+"'")
+ 
+     cmd = [
+             '/usr/bin/time',
+
+From f7f0ff2362881066e6224ead55001bebc555941c Mon Sep 17 00:00:00 2001
+From: "Roscoe A. Bartlett" <rabartl@sandia.gov>
+Date: Tue, 26 Jan 2021 09:43:17 -0700
+Subject: [PATCH 06/16] Turn on build-stats for all PR builds with robust
+ remove on fresh config (#7376)
+
+This will allow us to test if these updated build-stats wrappers work for all
+of the current Trilinos PR builds.
+---
+ cmake/std/PullRequestLinuxCommonTestingSettings.cmake | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/cmake/std/PullRequestLinuxCommonTestingSettings.cmake b/cmake/std/PullRequestLinuxCommonTestingSettings.cmake
+index 24f177e5b105..7244bab95b0d 100644
+--- a/cmake/std/PullRequestLinuxCommonTestingSettings.cmake
++++ b/cmake/std/PullRequestLinuxCommonTestingSettings.cmake
+@@ -109,5 +109,5 @@ set (TPL_Scotch_INCLUDE_DIRS "$ENV{SEMS_SCOTCH_INCLUDE_PATH}" CACHE PATH "Set by
+ set (Scotch_LIBRARY_DIRS "$ENV{SEMS_SCOTCH_LIBRARY_PATH}" CACHE PATH "Set by default for PR testing")
+ 
+ # Build stats compiler wrappers (#7376)
+-set(Trilinos_ENABLE_BUILD_STATS OFF CACHE BOOL "Set in PullRequestLinuxCommonTestingSettings.cmake")
+-# Turn them off for now in all PR builds until more review can be done.
++set(Trilinos_ENABLE_BUILD_STATS ON CACHE BOOL "Set in PullRequestLinuxCommonTestingSettings.cmake")
++set(Trilinos_REMOVE_BUILD_STATS_TIMING_FILES_ON_FRESH_CONFIGURE ON CACHE BOOL "Set in PullRequestLinuxCommonTestingSettings.cmake")
+
+From e5b05505929f8ab13b1f33ff928fdc45c910241f Mon Sep 17 00:00:00 2001
+From: "Roscoe A. Bartlett" <rabartl@sandia.gov>
+Date: Tue, 26 Jan 2021 15:17:38 -0700
+Subject: [PATCH 07/16] Let's try 'python' (#7376)
+
+Hopefully this will fix the errors we are seeing in the Trilinos PR builds.
+---
+ commonTools/build_stats/wrapper/magic_wrapper.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/commonTools/build_stats/wrapper/magic_wrapper.py b/commonTools/build_stats/wrapper/magic_wrapper.py
+index 8ce9e19802df..fec04c14c355 100755
+--- a/commonTools/build_stats/wrapper/magic_wrapper.py
++++ b/commonTools/build_stats/wrapper/magic_wrapper.py
+@@ -1,4 +1,4 @@
+-#!/usr/bin/env python3
++#!/usr/bin/env python
+ '''
+ 
+ Note:
+
+From 431dfad46300b7ff60a56ae2bda59408792a3741 Mon Sep 17 00:00:00 2001
+From: "Roscoe A. Bartlett" <rabartl@sandia.gov>
+Date: Tue, 26 Jan 2021 16:06:07 -0700
+Subject: [PATCH 08/16] Explicitly run with the configured PYTHON_EXECUTABLE
+ (#7376)
+
+I also put back the default python3 if you run magic_wrapper.py directly
+(which is not portable).
+---
+ commonTools/build_stats/build_stat_lang_wrapper.sh.in | 3 ++-
+ commonTools/build_stats/wrapper/magic_wrapper.py      | 2 +-
+ 2 files changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/commonTools/build_stats/build_stat_lang_wrapper.sh.in b/commonTools/build_stats/build_stat_lang_wrapper.sh.in
+index 530a4514526c..1d7350ad9bce 100755
+--- a/commonTools/build_stats/build_stat_lang_wrapper.sh.in
++++ b/commonTools/build_stats/build_stat_lang_wrapper.sh.in
+@@ -4,6 +4,7 @@ base_build_dir="@BASE_BUILD_DIR_FOR_PYTHON@"
+ if [ "${CMAKE_IS_IN_CONFIGURE_MODE}" == "1" ]; then
+   ${cmd} "$@"
+ else
+-  "@BUILD_STATS_SRC_DIR@/wrapper/magic_wrapper.py" \
++  "@PYTHON_EXECUTABLE@" \
++    "@BUILD_STATS_SRC_DIR@/wrapper/magic_wrapper.py" \
+     "----base-build-dir=${base_build_dir}" "----op=${cmd}" "$@"
+ fi
+diff --git a/commonTools/build_stats/wrapper/magic_wrapper.py b/commonTools/build_stats/wrapper/magic_wrapper.py
+index fec04c14c355..8ce9e19802df 100755
+--- a/commonTools/build_stats/wrapper/magic_wrapper.py
++++ b/commonTools/build_stats/wrapper/magic_wrapper.py
+@@ -1,4 +1,4 @@
+-#!/usr/bin/env python
++#!/usr/bin/env python3
+ '''
+ 
+ Note:
+
+From 680285ab66cbff72927f53f66c4a46e8451928e7 Mon Sep 17 00:00:00 2001
+From: "Roscoe A. Bartlett" <rabartl@sandia.gov>
+Date: Tue, 26 Jan 2021 16:19:44 -0700
+Subject: [PATCH 09/16] Make work with Python 2.7 (#7376)
+
+---
+ commonTools/build_stats/wrapper/NMParser.py | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/commonTools/build_stats/wrapper/NMParser.py b/commonTools/build_stats/wrapper/NMParser.py
+index 91e69b0a5ce0..c178abfd3e30 100644
+--- a/commonTools/build_stats/wrapper/NMParser.py
++++ b/commonTools/build_stats/wrapper/NMParser.py
+@@ -6,6 +6,7 @@
+ import subprocess # spawning nm
+ import re         # re matching
+ import os         # line seperator
++import sys
+ 
+ 
+ from Python2and3 import b, s
+@@ -54,11 +55,19 @@ def parse_object(filename):
+       The keys are obtained from nm_option_desc_map and enforced inside the regex used
+       See nm_re_type_expr, nm_re_str, and nm_re in the static fields of this class
+     """
++    FNULL = None
++    if sys.version_info < (3,):
++      FNULL = open(os.devnull, 'w')
++      local_devnull = FNULL
++    else:
++      local_devnull = subprocess.DEVNULL
+     p = subprocess.Popen(['nm', '-aS', filename],
+                          stdout=subprocess.PIPE,
+-                         stderr=subprocess.DEVNULL)
++                         stderr=local_devnull)
+     output = p.communicate()[0]
+ 
++    if FNULL: FNULL.close()
++
+     nm_counts = dict()
+ 
+     for line in output.split(b(os.linesep)):
+
+From 3a8e3886d2e3be19453eacaffeb0c95ea1d5a168 Mon Sep 17 00:00:00 2001
+From: "Roscoe A. Bartlett" <rabartl@sandia.gov>
+Date: Wed, 27 Jan 2021 09:32:20 -0700
+Subject: [PATCH 10/16] Remove print of warning of overwrite of build-stats
+ file (#7376)
+
+Turns out this breaks Fortran builds because it seems that the build system
+uses the Fortran compiler to produce some output that it puts in a file and
+then is read in by another compile comamnd with the Fortran compiler.
+Therefore, these build wrappers must be completely silent except for what the
+child command puts out.
+---
+ commonTools/build_stats/wrapper/WrapperOpTimer.py | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/commonTools/build_stats/wrapper/WrapperOpTimer.py b/commonTools/build_stats/wrapper/WrapperOpTimer.py
+index 3ddc03523009..815535c0d3b1 100644
+--- a/commonTools/build_stats/wrapper/WrapperOpTimer.py
++++ b/commonTools/build_stats/wrapper/WrapperOpTimer.py
+@@ -141,11 +141,11 @@ def time_op(op,
+     """
+       evaluate 'op' with 'op_args', and gather stats into output_stats_file
+     """
+-    if os.path.exists(output_stats_file) and os.path.getsize(output_stats_file) > 0:
+-      print("WARNING: File '"+output_stats_file+"' exists and will be overwritten")
+-      print("op='"+op+"'")
+-      print("op_args='"+str(op_args)+"'")
+-      print("op_output_file='"+op_output_file+"'")
++#    if os.path.exists(output_stats_file) and os.path.getsize(output_stats_file) > 0:
++#      print("WARNING: File '"+output_stats_file+"' exists and will be overwritten")
++#      print("op='"+op+"'")
++#      print("op_args='"+str(op_args)+"'")
++#      print("op_output_file='"+op_output_file+"'")
+ 
+     cmd = [
+             '/usr/bin/time',
+
+From 1092735905204f6876bbbc46fb3d38a4d63bb6dc Mon Sep 17 00:00:00 2001
+From: "James J. Elliott" <jjellio@sandia.gov>
+Date: Thu, 28 Jan 2021 23:38:28 -0700
+Subject: [PATCH 11/16] Some fixes
+
+1. Skip stats for files that we can't determine an output file for.
+2. Issue: do *not* use stdout/stderr in the wrappers.  subprocess
+appears to be keeping stdout/stderr bound to whatver the subprcess
+redirected too.  This shows up in the Fortran preprocessing where
+wrapper debug info kept ending up at the end of the preprocessed file.
+
+I should test whether using the non-python2 options like stdout=PIPE
+resolve it. I tried terminating and killing the returned subprocess, but
+output still landed in the files. (yuck).
+
+Also observed very odd behavior where timing files were not generated at
+all. I think that may be due to some caching of pythong compiled files
+(since WrapperOpTimer and WrapperCommand... are 'modules').
+
+I did both shared and static intel 17 builds and ultimately have timing
+files now. (so I am pushing the commit).
+
+On my RHEL7 machine, the summary python script failed due to unable to
+find a basic system module (forgot the name!) - wasn't encoding. I tried
+SEMS python2 and 3 to no avail.
+---
+ .../wrapper/WrapperCommandLineParser.py       | 12 +++-
+ .../build_stats/wrapper/WrapperOpTimer.py     | 59 ++++++++++---------
+ .../build_stats/wrapper/magic_wrapper.py      | 19 +++---
+ 3 files changed, 52 insertions(+), 38 deletions(-)
+
+diff --git a/commonTools/build_stats/wrapper/WrapperCommandLineParser.py b/commonTools/build_stats/wrapper/WrapperCommandLineParser.py
+index a89f39ab2ca5..4203d7411e4c 100644
+--- a/commonTools/build_stats/wrapper/WrapperCommandLineParser.py
++++ b/commonTools/build_stats/wrapper/WrapperCommandLineParser.py
+@@ -19,6 +19,8 @@ def __init__(self, cmdline_args):
+     self.print_csv_banner = False
+     # whatever the op's args should be
+     self.op_args = []
++    # whether we have the output arg
++    self.have_output_arg = False
+     self.parse_cmdline_args(cmdline_args)
+ 
+   def __repr__(self):
+@@ -27,6 +29,9 @@ def __repr__(self):
+   def __str__(self):
+     return self.lcl_print()
+ 
++  def generate_stats(self):
++    return self.have_output_arg
++
+   def lcl_print(self):
+     fmt_string = [
+       'output_stats_file : {output_stats_file}',
+@@ -42,7 +47,8 @@ def lcl_print(self):
+                   print_csv_banner=self.print_csv_banner)
+ 
+   def parse_cmdline_arg_helper(self, cmdline_args):
+-    
++
++    self.have_output_arg = False
+     # we want to do something different for ar, ranlib, or ld.*
+     # these commands do not necessarily have a good 'output' arg denoted by -o
+     # first try to find -o, if that passes then use it.
+@@ -54,7 +60,8 @@ def parse_cmdline_arg_helper(self, cmdline_args):
+       output_idx = cmdline_args.index('-o')
+       self.op_output_file = cmdline_args[output_idx+1]
+       self.output_stats_file = self.op_output_file + '.' + self.output_stats_file
+-  
++ 
++      self.have_output_arg = True 
+       return
+ 
+     except:
+@@ -66,6 +73,7 @@ def parse_cmdline_arg_helper(self, cmdline_args):
+         if arg.endswith('.a'):
+           self.op_output_file = arg
+           self.output_stats_file = arg + '.' + self.output_stats_file
++          self.have_output_arg = True
+           return
+       # we hit this if we can't find a .a
+       return
+diff --git a/commonTools/build_stats/wrapper/WrapperOpTimer.py b/commonTools/build_stats/wrapper/WrapperOpTimer.py
+index 815535c0d3b1..fb4a63d41bf5 100644
+--- a/commonTools/build_stats/wrapper/WrapperOpTimer.py
++++ b/commonTools/build_stats/wrapper/WrapperOpTimer.py
+@@ -1,6 +1,7 @@
+ import subprocess
+ import csv
+ import os
++from WrapperCommandLineParser import WrapperCommandLineParser
+ 
+ def get_full_header(fields_list,full_header_map):
+   return ','.join([ full_header_map[f] for f in fields_list ])
+@@ -133,38 +134,38 @@ class WrapperOpTimer:
+   field_arg = '--format=' + field_header_full + '\n' + ','.join([ '%{}'.format(f) for f in default_fields] )
+ 
+   @staticmethod
+-  def time_op(op,
+-              op_output_file,
+-              output_stats_file,
+-              op_args,
+-              base_build_dir=None):
++  def run_cmd(cmd):
++    p = subprocess.Popen(cmd)
++    p.communicate()
++    returncode = p.returncode
++    return returncode
++
++  @staticmethod
++  def time_op(wcp):
+     """
+       evaluate 'op' with 'op_args', and gather stats into output_stats_file
+     """
+-#    if os.path.exists(output_stats_file) and os.path.getsize(output_stats_file) > 0:
+-#      print("WARNING: File '"+output_stats_file+"' exists and will be overwritten")
+-#      print("op='"+op+"'")
+-#      print("op_args='"+str(op_args)+"'")
+-#      print("op_output_file='"+op_output_file+"'")
++    # if os.path.exists(output_stats_file) and os.path.getsize(output_stats_file) > 0:
++    #   print("WARNING: File '"+output_stats_file+"' exists and will be overwritten")
++    #   print("op='"+op+"'")
++    #   print("op_args='"+str(op_args)+"'")
++    #   print("op_output_file='"+op_output_file+"'")
++
++    # initializing the titles and rows list
++    fields = []
++    csv_row = {}
+ 
+     cmd = [
+             '/usr/bin/time',
+             # '--append',
+-            '--output=' + output_stats_file,
++            '--output=' + wcp.output_stats_file,
+             WrapperOpTimer.field_arg,
+-           op ] + op_args
+-
+-    # print(' '.join(cmd))
+-    p = subprocess.Popen(cmd)
+-    p.communicate()
+-    returncode = p.returncode
++            wcp.op ] + wcp.op_args
+ 
+-    # initializing the titles and rows list
+-    fields = []
+-    csv_row = {}
++    returncode = WrapperOpTimer.run_cmd(cmd)
+ 
+     # reading csv file
+-    with open(output_stats_file, 'r') as csvfile:
++    with open(wcp.output_stats_file, 'r') as csvfile:
+       # creating a csv reader object
+       csvreader = csv.reader(csvfile)
+ 
+@@ -178,25 +179,25 @@ def time_op(op,
+         csv_row = dict(zip(fields, row))
+ 
+     # FileSize
+-    csv_row['FileSize'] = WrapperOpTimer.get_file_size(op_output_file)
++    csv_row['FileSize'] = WrapperOpTimer.get_file_size(wcp.op_output_file)
+ 
+     # add a field with the short op
+-    csv_row['op'] = os.path.basename(op)
++    csv_row['op'] = os.path.basename(wcp.op)
+ 
+     # FileName
+-    if base_build_dir:
+-      abs_base_build_dir = os.path.abspath(base_build_dir)
++    if wcp.base_build_dir:
++      abs_base_build_dir = os.path.abspath(wcp.base_build_dir)
+       current_working_dir = os.path.abspath(os.getcwd())
+       rel_path_to_base_build_dir = os.path.relpath(
+         current_working_dir, start=abs_base_build_dir)
+-      rel_op_output_file = os.path.join(rel_path_to_base_build_dir, op_output_file)
++      rel_op_output_file = os.path.join(rel_path_to_base_build_dir, wcp.op_output_file)
+     else:
+-      rel_op_output_file = op_output_file
++      rel_op_output_file = wcp.op_output_file
+     csv_row['FileName'] = rel_op_output_file
+ 
+     # Remove the build stats output file if the build failed
+-    if returncode != 0 and os.path.exists(output_stats_file):
+-      os.remove(output_stats_file)
++    if returncode != 0 and os.path.exists(wcp.output_stats_file):
++      os.remove(wcp.output_stats_file)
+ 
+     return (csv_row, returncode)
+ 
+diff --git a/commonTools/build_stats/wrapper/magic_wrapper.py b/commonTools/build_stats/wrapper/magic_wrapper.py
+index 8ce9e19802df..7ceba0840537 100755
+--- a/commonTools/build_stats/wrapper/magic_wrapper.py
++++ b/commonTools/build_stats/wrapper/magic_wrapper.py
+@@ -38,13 +38,18 @@ def main(cmdline_args):
+   # keep a dict of field : value
+   # first do the operation
+   # this must be first, as it generates the output file
+-  (csv_map, returncode) = \
+-     WrapperOpTimer.time_op(
+-       base_build_dir=wcp.base_build_dir,
+-       op=wcp.op,
+-       op_output_file=wcp.op_output_file,
+-       output_stats_file=wcp.output_stats_file,
+-       op_args=wcp.op_args)
++  #
++  # WARNING: Be very careful with stdout before these commands.  If the wrapped command
++  # has shell redirection it can slurp up Python's output... best to require all messages
++  # go after the compiler commnand has completed.
++  if wcp.generate_stats():
++    (csv_map, returncode) = WrapperOpTimer.time_op(wcp)
++    #print("======> Gathering stats...", file=sys.stdout)
++  else:
++    # only run the command and return the return code
++    returncode = WrapperOpTimer.run_cmd([wcp.op] + wcp.op_args)
++    #print("##======> NO stats {}".format(wcp.op_output_file), file=sys.stdout)
++    return returncode
+ 
+   if returncode == 0:
+     # test nm
+
+From 31fadc18e1a1449ac9778bcbaf40ec304e61ec22 Mon Sep 17 00:00:00 2001
+From: "Roscoe A. Bartlett" <rabartl@sandia.gov>
+Date: Fri, 29 Jan 2021 14:43:36 -0700
+Subject: [PATCH 12/16] Enable build stats for SERIAL PR builds (#7376)
+
+I will disable these before the merge but this will allow testing for the
+serial PR build with build stats.
+---
+ cmake/std/PullRequestLinuxCommonTestingSettingsSERIAL.cmake | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/cmake/std/PullRequestLinuxCommonTestingSettingsSERIAL.cmake b/cmake/std/PullRequestLinuxCommonTestingSettingsSERIAL.cmake
+index b1ea16ecbe9c..9e28f46be0e0 100644
+--- a/cmake/std/PullRequestLinuxCommonTestingSettingsSERIAL.cmake
++++ b/cmake/std/PullRequestLinuxCommonTestingSettingsSERIAL.cmake
+@@ -100,5 +100,6 @@ SET(SuperLU_LIBRARY_DIRS "$ENV{SEMS_SUPERLU_LIBRARY_PATH}" CACHE PATH "Set by de
+ # set (TPL_Scotch_INCLUDE_DIRS "$ENV{SEMS_SCOTCH_INCLUDE_PATH}" CACHE PATH "Set by default for PR testing")
+ # set (Scotch_LIBRARY_DIRS "$ENV{SEMS_SCOTCH_LIBRARY_PATH}" CACHE PATH "Set by default for PR testing")
+ 
+-
+-
++# Build stats compiler wrappers (#7376)
++set(Trilinos_ENABLE_BUILD_STATS ON CACHE BOOL "Set in PullRequestLinuxCommonTestingSettingsSERIAL.cmake")
++set(Trilinos_REMOVE_BUILD_STATS_TIMING_FILES_ON_FRESH_CONFIGURE ON CACHE BOOL "Set in PullRequestLinuxCommonTestingSettingsSERIAL.cmake")
+
+From 162147aa4640ee52af05df959bb3791b3e153638 Mon Sep 17 00:00:00 2001
+From: "James J. Elliott" <jjellio@sandia.gov>
+Date: Wed, 3 Mar 2021 00:03:19 -0700
+Subject: [PATCH 13/16] Fix csv field ordering
+
+The real fix is to apply a sort to the fields before writing. I also
+added the ability to write only certain fields - which is neat, but
+also means that we will not have detailed data if used.
+
+By using sort, this fix will ensure that for a given build, all timing
+files should have the same field order.
+
+CommandLineParser now scans the ENV for TRILINOS_BUILD_STATS_OUTPUT_FIELDS
+Which can optionally be used to specify only a few fields to write out.
+
+The field order can still change if new fields are added (between builds).
+Or if the scripts are changed. It would probably be productive to
+assume:
+  CSV field orderings for a given build will be consistent
+  Field ordering between builds can change.
+
+Given this is likely used in CI testing, where builds are intentionally
+*kept* - perhaps the answer is to take the current csv fields, and set
+TRILINOS_BUILD_STATS_OUTPUT_FIELDS=<everything we have now> (in
+whatever order you want).
+
+Then, if we add fields later, there would still need to be logic to
+ensure that a reliable merge of old + new data can happen (so that
+problem never really goes away).
+---
+ .../wrapper/WrapperCommandLineParser.py       | 63 +++++++++++++++++++
+ .../build_stats/wrapper/WrapperOpTimer.py     | 29 ++++++---
+ .../build_stats/wrapper/magic_wrapper.py      | 15 +++--
+ 3 files changed, 94 insertions(+), 13 deletions(-)
+
+diff --git a/commonTools/build_stats/wrapper/WrapperCommandLineParser.py b/commonTools/build_stats/wrapper/WrapperCommandLineParser.py
+index 4203d7411e4c..297a033d45b2 100644
+--- a/commonTools/build_stats/wrapper/WrapperCommandLineParser.py
++++ b/commonTools/build_stats/wrapper/WrapperCommandLineParser.py
+@@ -19,10 +19,42 @@ def __init__(self, cmdline_args):
+     self.print_csv_banner = False
+     # whatever the op's args should be
+     self.op_args = []
++    # a list of lists of commands to evaluate
++    self.commands = []
+     # whether we have the output arg
+     self.have_output_arg = False
++    # ENV control variables
++    self.parse_nm = True
++    self.output_fields = None
++
++    self.parse_env_controls()
++    # finally parse the args
+     self.parse_cmdline_args(cmdline_args)
+ 
++  def parse_env_controls(self):
++    """Parse control variables from the ENV (rather than command line)
++
++       TRILINOS_BUILD_STATS_OUTPUT_FIELDS : control what gets written to timing files
++        Can enable only some fields
++           e.g.,
++           FileName,FileSize,op
++    """
++    # optional, control which fields we write to a file
++    # This does not promise we will not parse all possible fields
++    # (That is to say, this does not promise any performance benefits)
++    self.output_fields = os.environ.get('TRILINOS_BUILD_STATS_OUTPUT_FIELDS')
++
++    parse_nm = os.environ.get('TRILINOS_BUILD_STATS_PARSE_NM', "True")
++    if parse_nm.lower() == 'true':
++      self.parse_nm = True
++    elif parse_nm.lower() == 'false':
++      self.parse_nm = False
++    else:
++      msg='ERROR: TRILINOS_BUILD_STATS_PARSE_NM is set to [{}]'.format(parse_nm)
++      msg+=', but valid values are True or False. Defaulting to True{}'.format(os.linesep)
++      sys.stderr.write(msg);
++      self.parse_nm = True
++
+   def __repr__(self):
+     return self.lcl_print()
+ 
+@@ -46,6 +78,34 @@ def lcl_print(self):
+                   op=self.op,
+                   print_csv_banner=self.print_csv_banner)
+ 
++  def get_output_fields(self,csv_map):
++    if self.output_fields:
++      # this assumes it is a string of comma separated labels
++      fields = self.output_fields.split(',')
++    else:
++      # apply sort here, so the output will be deterministic
++      fields = sorted([ k for k in csv_map ])
++
++    return fields
++
++  def generate_commandlets(self, cmdline_args):
++
++    # it seems we need to handle compound commands e.g., && (maybe ||)
++    cmdlet = []
++    for arg in cmdline_args:
++      if arg.strip() == "&&":
++        # add the command
++        self.commands.append(cmdlet)
++        # start a new command
++        cmdlet = []
++      elif arg.strip() != '':
++        cmdlet.append(arg)
++
++    if cmdlet:
++      self.commands.append(cmdlet)
++    # post - should have all commands broken up into lists of lists (of options)
++    return
++
+   def parse_cmdline_arg_helper(self, cmdline_args):
+ 
+     self.have_output_arg = False
+@@ -110,10 +170,13 @@ def parse_cmdline_args(self, cmdline_args):
+ 
+       # Remove the first wrapper_arg_idx+1 args (script name + wrapper args)
+       self.op_args = cmdline_args[wrapper_arg_idx+1:]
++      # we could clean this whole thing up some..
++      self.generate_commandlets([self.op] + self.op_args)
+ 
+     except Exception as e:
+       print("Got an error parsing the command line in the compiler wrapper python script")
+       print(e)
++      raise
+       # any error and we give up
+       help_msg = ["Compiler wrapper:",
+                   "  Usage: wrapper [---base-build-dir=<dir>] ----op=<compiler> [args] | ----get_header",
+diff --git a/commonTools/build_stats/wrapper/WrapperOpTimer.py b/commonTools/build_stats/wrapper/WrapperOpTimer.py
+index fb4a63d41bf5..f777dd867ae7 100644
+--- a/commonTools/build_stats/wrapper/WrapperOpTimer.py
++++ b/commonTools/build_stats/wrapper/WrapperOpTimer.py
+@@ -155,14 +155,17 @@ def time_op(wcp):
+     fields = []
+     csv_row = {}
+ 
+-    cmd = [
+-            '/usr/bin/time',
+-            # '--append',
+-            '--output=' + wcp.output_stats_file,
+-            WrapperOpTimer.field_arg,
+-            wcp.op ] + wcp.op_args
+-
+-    returncode = WrapperOpTimer.run_cmd(cmd)
++    cmdcount = 0
++    returncode = 0
++    for cmd in wcp.commands:
++      if cmdcount == 0:
++        cmd = [ '/usr/bin/time',
++                # '--append',
++                '--output=' + wcp.output_stats_file,
++                WrapperOpTimer.field_arg,
++               ] + cmd
++      cmdcount += 1
++      returncode |= WrapperOpTimer.run_cmd(cmd)
+ 
+     # reading csv file
+     with open(wcp.output_stats_file, 'r') as csvfile:
+@@ -173,8 +176,16 @@ def time_op(wcp):
+       fields = next(csvreader)
+ 
+       # extracting each data row one by one
+-      # we effectively retain on the last row.
++      # we effectively retain only the last row.
+       # it isn't clear if we should expect multiple rows per file
++      #
++      # In the bash version of this I was able to handle multiple rows per file
++      # We could do that here, but it would require returning a list of csv maps
++      # On the system side of things, it is very murky.  We would need to ensure
++      # file integrity (concurrent reads/writes).  For now, it's
++      # best to enforce 1 file per operation performed. (which should happen if we
++      # name things correctly) - That is invalid is there is a cycle in the Build graph,
++      # but that is a larger problem.
+       for row in csvreader:
+         csv_row = dict(zip(fields, row))
+ 
+diff --git a/commonTools/build_stats/wrapper/magic_wrapper.py b/commonTools/build_stats/wrapper/magic_wrapper.py
+index 7ceba0840537..360a9c8cc3fd 100755
+--- a/commonTools/build_stats/wrapper/magic_wrapper.py
++++ b/commonTools/build_stats/wrapper/magic_wrapper.py
+@@ -17,11 +17,14 @@
+ from WrapperOpTimer import WrapperOpTimer
+ 
+ # given a dict of key/val pairs, write them as a CSV line
+-def write_csv_map(filename,csv_map):
++def write_csv_map(filename,csv_map,csv_fields):
+   try:
+     with open(filename, 'w') as csvfile:
+       writer = csv.DictWriter(csvfile,
+-                              fieldnames=[ k for k in csv_map ])
++                              fieldnames=csv_fields,
++                              # ignore fields in the csv_map that aren't
++                              # in fieldnames
++                              extrasaction='ignore')
+       writer.writeheader()
+       writer.writerow(csv_map)
+   except IOError:
+@@ -47,7 +50,9 @@ def main(cmdline_args):
+     #print("======> Gathering stats...", file=sys.stdout)
+   else:
+     # only run the command and return the return code
+-    returncode = WrapperOpTimer.run_cmd([wcp.op] + wcp.op_args)
++    returncode = 0
++    for cmd in wcp.commands:
++      returncode |= WrapperOpTimer.run_cmd(cmd)
+     #print("##======> NO stats {}".format(wcp.op_output_file), file=sys.stdout)
+     return returncode
+ 
+@@ -64,7 +69,9 @@ def main(cmdline_args):
+ 
+     # ultimately, print the csv data to a file
+     # make sure to quote csv columns
+-    write_csv_map(wcp.output_stats_file, csv_map)
++    write_csv_map(wcp.output_stats_file,
++                  csv_map,
++                  csv_fields=wcp.get_output_fields(csv_map))
+ 
+   # NOTE: Above, we don't write the *.timing file if the build failed because
+   # the output target file may not exist!  And we don't want a CSV file entry
+
+From e379ec6257e4c8a36cff2150ecea80ed9e786aaa Mon Sep 17 00:00:00 2001
+From: "James J. Elliott" <jjellio@sandia.gov>
+Date: Wed, 3 Mar 2021 00:38:39 -0700
+Subject: [PATCH 14/16] Revert the WrapperOpTimer constant data back to outside
+ class
+
+I'm still not sure what the problem is here (NMParser does fine with
+arrays defined inside the class), but See bcdadcb says it breaks with
+Python 3.6 (which I haven't tested with).
+---
+ .../build_stats/wrapper/WrapperOpTimer.py     | 251 +++++++++---------
+ 1 file changed, 126 insertions(+), 125 deletions(-)
+
+diff --git a/commonTools/build_stats/wrapper/WrapperOpTimer.py b/commonTools/build_stats/wrapper/WrapperOpTimer.py
+index f777dd867ae7..38b14f7c3220 100644
+--- a/commonTools/build_stats/wrapper/WrapperOpTimer.py
++++ b/commonTools/build_stats/wrapper/WrapperOpTimer.py
+@@ -6,132 +6,133 @@
+ def get_full_header(fields_list,full_header_map):
+   return ','.join([ full_header_map[f] for f in fields_list ])
+ 
+-class WrapperOpTimer:
+ 
+ # the values are
+-  usr_bin_time_csv_map = {
+-    "E":
+-      "elapsed_real_time_fmt",
+-    "e":
+-      "elapsed_real_time_sec",
+-    "S":
+-      "cpu_sec_kernel_mode",
+-    "U":
+-      "cpu_sec_user_mode",
+-    "P":
+-      "perc_cpu_used",
+-    "M":
+-      "max_resident_size_Kb",
+-    "t":
+-      "avg_resident_size_Kb",
+-    "K":
+-      "avg_total_memory_used_Kb",
+-    "D":
+-      "avg_size_unshared_data_area_Kb",
+-    "p":
+-      "avg_size_unshared_stack_area_Kb",
+-    "X":
+-      "avg_size_unshared_text_area_Kb",
+-    "Z":
+-      'page_size_bytes',
+-    "F":
+-      "num_major_page_faults",
+-    "R":
+-      "num_minor_page_faults",
+-    "W":
+-      "num_swapped",
+-    "c":
+-      "num_involuntary_context_switch",
+-    "w":
+-      "num_waits",
+-    "I":
+-      "num_filesystem_inputs",
+-    "O":
+-      "num_filesystem_outputs",
+-    "r":
+-      "num_socket_msg_recv",
+-    "s":
+-      "num_socket_msg_sent",
+-    "k":
+-      "num_signals",
+-    "x":
+-      "exit_status",
+-  }
+-
+-  usr_bin_time_desc_map = {
+-    "E":
+-      "Elapsed real time ([h:]m:s)",
+-    "e":
+-      "Elapsed real time (s)",
+-    "S":
+-      "Total number of CPU-seconds that the process spent in kernel mode",
+-    "U":
+-      "Total number of CPU-seconds that the process spent in user mode",
+-    "P":
+-      "Percentage of the CPU that this job got",
+-    "M":
+-      "Maximum resident set size of the process during its lifetime (Kb)",
+-    "t":
+-      "(Not in tcsh.) Average resident set size of the process (Kb)",
+-    "K":
+-      "Average total (data+stack+text) memory use of the process (Kb)",
+-    "D":
+-      "Average size of unshared data area (Kb)",
+-    "p":
+-      "Average size of unshared stack space (Kb)",
+-    "X":
+-      "Average size of shared text space (Kb)",
+-    "Z":
+-      "System page size (bytes)",
+-    "F":
+-      "Number of major page faults",
+-    "R":
+-      "Number of minor or recoverable page faults",
+-    "W":
+-      "Number of times the process was swapped out of main memory",
+-    "c":
+-      "Number of times the process was context-switched involuntarily",
+-    "w":
+-      "Number of waits",
+-    "I":
+-      "Number of file system inputs by the process",
+-    "O":
+-      "Number of file system outputs by the process",
+-    "r":
+-      "Number of socket messages received by the process",
+-    "s":
+-      "Number of socket messages sent by the process",
+-    "k":
+-      "Number of signals delivered to the process",
+-    "x":
+-      "(Not in tcsh.) Exit status of the command",
+-  }
+-
+-  default_fields = [
+-    "e",
+-    "M",
+-    "K",
+-    "D",
+-    "X",
+-    "F",
+-    "R",
+-    "W",
+-    "w",
+-    "c",
+-    "S",
+-    "U",
+-    "P",
+-    "I",
+-    "O",
+-    "r",
+-    "s",
+-    "k",
+-    "x",
+-    ]
+-
+-  field_header_full = get_full_header(default_fields, usr_bin_time_csv_map) #','.join([ WrapperOpTimer.usr_bin_time_csv_map[f] for f in default_fields ])
+-  field_header_short = ','.join(default_fields)
+-  field_arg = '--format=' + field_header_full + '\n' + ','.join([ '%{}'.format(f) for f in default_fields] )
++usr_bin_time_csv_map = {
++  "E":
++    "elapsed_real_time_fmt",
++  "e":
++    "elapsed_real_time_sec",
++  "S":
++    "cpu_sec_kernel_mode",
++  "U":
++    "cpu_sec_user_mode",
++  "P":
++    "perc_cpu_used",
++  "M":
++    "max_resident_size_Kb",
++  "t":
++    "avg_resident_size_Kb",
++  "K":
++    "avg_total_memory_used_Kb",
++  "D":
++    "avg_size_unshared_data_area_Kb",
++  "p":
++    "avg_size_unshared_stack_area_Kb",
++  "X":
++    "avg_size_unshared_text_area_Kb",
++  "Z":
++    'page_size_bytes',
++  "F":
++    "num_major_page_faults",
++  "R":
++    "num_minor_page_faults",
++  "W":
++    "num_swapped",
++  "c":
++    "num_involuntary_context_switch",
++  "w":
++    "num_waits",
++  "I":
++    "num_filesystem_inputs",
++  "O":
++    "num_filesystem_outputs",
++  "r":
++    "num_socket_msg_recv",
++  "s":
++    "num_socket_msg_sent",
++  "k":
++    "num_signals",
++  "x":
++    "exit_status",
++}
++
++usr_bin_time_desc_map = {
++  "E":
++    "Elapsed real time ([h:]m:s)",
++  "e":
++    "Elapsed real time (s)",
++  "S":
++    "Total number of CPU-seconds that the process spent in kernel mode",
++  "U":
++    "Total number of CPU-seconds that the process spent in user mode",
++  "P":
++    "Percentage of the CPU that this job got",
++  "M":
++    "Maximum resident set size of the process during its lifetime (Kb)",
++  "t":
++    "(Not in tcsh.) Average resident set size of the process (Kb)",
++  "K":
++    "Average total (data+stack+text) memory use of the process (Kb)",
++  "D":
++    "Average size of unshared data area (Kb)",
++  "p":
++    "Average size of unshared stack space (Kb)",
++  "X":
++    "Average size of shared text space (Kb)",
++  "Z":
++    "System page size (bytes)",
++  "F":
++    "Number of major page faults",
++  "R":
++    "Number of minor or recoverable page faults",
++  "W":
++    "Number of times the process was swapped out of main memory",
++  "c":
++    "Number of times the process was context-switched involuntarily",
++  "w":
++    "Number of waits",
++  "I":
++    "Number of file system inputs by the process",
++  "O":
++    "Number of file system outputs by the process",
++  "r":
++    "Number of socket messages received by the process",
++  "s":
++    "Number of socket messages sent by the process",
++  "k":
++    "Number of signals delivered to the process",
++  "x":
++    "(Not in tcsh.) Exit status of the command",
++}
++
++default_fields = [
++  "e",
++  "M",
++  "K",
++  "D",
++  "X",
++  "F",
++  "R",
++  "W",
++  "w",
++  "c",
++  "S",
++  "U",
++  "P",
++  "I",
++  "O",
++  "r",
++  "s",
++  "k",
++  "x",
++  ]
++
++field_header_full = get_full_header(default_fields, usr_bin_time_csv_map) #','.join([ WrapperOpTimer.usr_bin_time_csv_map[f] for f in default_fields ])
++field_header_short = ','.join(default_fields)
++field_arg = '--format=' + field_header_full + '\n' + ','.join([ '%{}'.format(f) for f in default_fields] )
++
++class WrapperOpTimer:
+ 
+   @staticmethod
+   def run_cmd(cmd):
+@@ -162,7 +163,7 @@ def time_op(wcp):
+         cmd = [ '/usr/bin/time',
+                 # '--append',
+                 '--output=' + wcp.output_stats_file,
+-                WrapperOpTimer.field_arg,
++                field_arg,
+                ] + cmd
+       cmdcount += 1
+       returncode |= WrapperOpTimer.run_cmd(cmd)
+
+From 71a15275bbb9c5804e723e5e45b6b5e652d4cc33 Mon Sep 17 00:00:00 2001
+From: "James J. Elliott" <jjellio@sandia.gov>
+Date: Mon, 19 Apr 2021 15:33:50 -0600
+Subject: [PATCH 15/16] Update Cmake to remove duplicate functions
+
+Make explicit we guess a value for unset CMAKE_AR, and others
+Update install function to use `op` naming rather than compiler
+Update generator function to set proper wrapper generation variable
+(compiler->op naming)
+
+Update wrapper template to use new naming scheme
+---
+ .../build_stats/BuildStatsWrappers.cmake      | 100 +++++++++---------
+ .../build_stats/build_stat_lang_wrapper.sh.in |   2 +-
+ 2 files changed, 49 insertions(+), 53 deletions(-)
+
+diff --git a/commonTools/build_stats/BuildStatsWrappers.cmake b/commonTools/build_stats/BuildStatsWrappers.cmake
+index 9759991d65e1..31bae70457d9 100644
+--- a/commonTools/build_stats/BuildStatsWrappers.cmake
++++ b/commonTools/build_stats/BuildStatsWrappers.cmake
+@@ -34,10 +34,10 @@ function(generate_build_stats_wrappers)
+   # Generate the build-stats compiler wrappers
+   get_base_build_dir_for_python()
+   if (${PROJECT_NAME}_ENABLE_BUILD_STATS)
+-    generate_build_stats_wrapper_for_lang(C)
+-    generate_build_stats_wrapper_for_lang(CXX)
++    generate_build_stats_wrapper_for_op(C "CMAKE_C_COMPILER")
++    generate_build_stats_wrapper_for_op(CXX "CMAKE_CXX_COMPILER")
+     if (${PROJECT_NAME}_ENABLE_Fortran)
+-      generate_build_stats_wrapper_for_lang(Fortran)
++      generate_build_stats_wrapper_for_op(Fortran "CMAKE_Fortran_COMPILER")
+     endif()
+ 
+     generate_build_stats_wrapper_for_op(LD "CMAKE_LD")
+@@ -51,38 +51,64 @@ function(generate_build_stats_wrappers)
+ 
+ endfunction()
+ 
+-# Generate the build stats compiler wrapper for a ar/ld/ranlib
++
++# Generate the build stats compiler wrapper for a given CMake variable.
+ #
+ # the only difference between this and lang, is setting the proper
+ # Cmake variable name, e.g., CMAKE_LANG_COMPILER  vs CMAKE_OP
+ # we can resolve this by taking in name of the variable to set
++#
++# The intent of this function is pass in arbitrary cmake variables that
++# map to commands and generate suitable wrappers.
++#
++# Supported functions are C, CXX, Fortran, AR, LD, and RANLIB
++#
++#  TODO: wrap MPIEXEC!
+ function(generate_build_stats_wrapper_for_op op_name variable_to_set)
+ 
++  # 'op_name' is the short name, like C, CXX, Fortran, LD, AR, RANLIB
++  # this is will give us a lowercase 
+   string(TOLOWER "${op_name}" op_lc)
+-  set(compiler_wrapper
++  set(op_wrapper
+     "${${PROJECT_NAME}_BINARY_DIR}/build_stat_${op_lc}_wrapper.sh")
+ 
++  # there's an issue here - if CMAKE_FOO is unset (whatever `variable_to_set` is)
++  # we need a to know the command - but CMake hasn't chosen one yet...
++  if ("${${variable_to_set}}" STREQUAL "")
++    message("-- " "${variable_to_set} is not set, but a wrapper has been requested. Setting to ${op_lc}")
++    set(${variable_to_set} "${op_lc}"
++      CACHE FILEPATH "Guessed default for ${op_name} in build stats wrapper" FORCE )
++    print_var(${variable_to_set})
++  endif()
++
+   # Override the compiler with the wrapper but remember the original compiler
++  # we take as a paramter a CMake variable to set, e.g., CMAKE_CXX_COMPILER
+   if ("${${variable_to_set}_ORIG}" STREQUAL "")
+-    set(${variable_to_set}_ORIG "${op_lc}"
++    # we want to set CMAKE_C_COMPILER_ORIG to CMAKE_C_COMPILER
++    # variable to set is a string, so we need the value of the string evaluated
++    set(${variable_to_set}_ORIG ${${variable_to_set}}
+       CACHE FILEPATH "Original non-wrappeed ${op_name}" FORCE )
+-    set(${variable_to_set} "${compiler_wrapper}"
+-      CACHE FILEPATH "Overwritten build stats ${op_name} compiler wrapper" FORCE )
++    set(${variable_to_set} "${op_wrapper}"
++      CACHE FILEPATH "Overwritten build stats ${op_name} wrapper" FORCE )
+   endif()
+ 
+-  message("-- " "Generate build stats compiler wrapper for ${op_name}")
+-  set(BUILD_STAT_COMPILER_WRAPPER_INNER_COMPILER "${${variable_to_set}_ORIG}")
++  # write the wrapper file
++  message("-- " "Generate build stats wrapper for ${op_name}")
++  set(BUILD_STAT_COMPILER_WRAPPER_INNER_OP "${${variable_to_set}_ORIG}")
+   configure_file("${BUILD_STATS_SRC_DIR}/build_stat_lang_wrapper.sh.in"
+-    "${compiler_wrapper}" @ONLY)
+-  print_var(${variable_to_set})
++    "${op_wrapper}" @ONLY)
+ 
+   # Use the orginal compiler for the installed <XXX>Config.cmake files
+   # doubt this works w/AR/LD/RANLIB
+-  set(${variable_to_set}_COMPILER_FOR_CONFIG_FILE_INSTALL_DIR
++  set(${variable_to_set}_OP_FOR_CONFIG_FILE_INSTALL_DIR
+     "${${variable_to_set}_ORIG}" CACHE INTERNAL "")
+-  print_var(${variable_to_set}_COMPILER_FOR_CONFIG_FILE_INSTALL_DIR)
+ 
+ endfunction()
++# NOTE: The above implementation will make sure the compiler wrapper will get
++# updated if the *.sh.in template file changes and just reconfiguring.
++# Actaully, you should be able to fix the wrapper and just type 'make' and it
++# should reconfigure and update automatically.
++
+ 
+ # Get the var BASE_BUILD_DIR_FOR_PYTHON
+ #
+@@ -104,40 +130,6 @@ endmacro()
+ # needed when computing relative paths.
+ 
+ 
+-# Generate the build stats compiler wrapper for a single language.
+-#
+-function(generate_build_stats_wrapper_for_lang  lang)
+-
+-  string(TOLOWER "${lang}" lang_lc)
+-  set(compiler_wrapper
+-    "${${PROJECT_NAME}_BINARY_DIR}/build_stat_${lang_lc}_wrapper.sh")
+-
+-  # Override the compiler with the wrapper but remember the original compiler
+-  if ("${CMAKE_${lang}_COMPILER_ORIG}" STREQUAL "")
+-    set(CMAKE_${lang}_COMPILER_ORIG "${CMAKE_${lang}_COMPILER}"
+-      CACHE FILEPATH "Original non-wrappeed ${lang} compiler" FORCE )
+-    set(CMAKE_${lang}_COMPILER "${compiler_wrapper}"
+-      CACHE FILEPATH "Overwritten build stats ${lang} compiler wrapper" FORCE )
+-  endif()
+-
+-  message("-- " "Generate build stats compiler wrapper for ${lang}")
+-  set(BUILD_STAT_COMPILER_WRAPPER_INNER_COMPILER "${CMAKE_${lang}_COMPILER_ORIG}")
+-  configure_file("${BUILD_STATS_SRC_DIR}/build_stat_lang_wrapper.sh.in"
+-    "${compiler_wrapper}" @ONLY)
+-
+-  # Use the orginal compiler for the installed <XXX>Config.cmake files
+-  set(CMAKE_${lang}_COMPILER_FOR_CONFIG_FILE_INSTALL_DIR
+-    "${CMAKE_${lang}_COMPILER_ORIG}" CACHE INTERNAL "")
+-  #print_var(CMAKE_${lang}_COMPILER_FOR_CONFIG_FILE_INSTALL_DIR)
+-
+-endfunction()
+-
+-# NOTE: The above implementation will make sure the compiler wrapper will get
+-# updated if the *.sh.in template file changes and just reconfiguring.
+-# Actaully, you should be able to fix the wrapper and just type 'make' and it
+-# should reconfigure and update automatically.
+-
+-
+ # Remove the build stats file on configure if asked to do so.
+ #
+ function(remove_build_stats_file_on_configure)
+@@ -205,6 +197,9 @@ function(install_build_stats_scripts)
+       install_build_stats_wrapper_for_lang(Fortran)
+     endif()
+ 
++    install_build_stats_wrapper_for_lang(AR)
++    install_build_stats_wrapper_for_lang(LD)
++    install_build_stats_wrapper_for_lang(RANLIB)
+   endif()
+ 
+ endfunction()
+@@ -213,10 +208,11 @@ endfunction()
+ # Install the build stats compiler wrapper for a single language.
+ #
+ function(install_build_stats_wrapper_for_lang  lang)
+-  string(TOLOWER "${lang}" lang_lc)
+-  set(compiler_wrapper
+-    "${${PROJECT_NAME}_BINARY_DIR}/build_stat_${lang_lc}_wrapper.sh")
+-  install(PROGRAMS "${compiler_wrapper}"
++  string(TOLOWER "${op_name}" op_lc)
++  set(op_wrapper
++    "${${PROJECT_NAME}_BINARY_DIR}/build_stat_${op_lc}_wrapper.sh")
++
++  install(PROGRAMS "${op_wrapper}"
+     DESTINATION "${${PROJECT_NAME}_INSTALL_RUNTIME_DIR}")
+ endfunction()
+ 
+diff --git a/commonTools/build_stats/build_stat_lang_wrapper.sh.in b/commonTools/build_stats/build_stat_lang_wrapper.sh.in
+index 1d7350ad9bce..a6598e5cb926 100755
+--- a/commonTools/build_stats/build_stat_lang_wrapper.sh.in
++++ b/commonTools/build_stats/build_stat_lang_wrapper.sh.in
+@@ -1,5 +1,5 @@
+ #!/bin/bash
+-cmd="@BUILD_STAT_COMPILER_WRAPPER_INNER_COMPILER@"
++cmd="@BUILD_STAT_COMPILER_WRAPPER_INNER_OP@"
+ base_build_dir="@BASE_BUILD_DIR_FOR_PYTHON@"
+ if [ "${CMAKE_IS_IN_CONFIGURE_MODE}" == "1" ]; then
+   ${cmd} "$@"
+
+From 7f3ed9c077a6ae5cc9616dbf4c992c77b1ae672f Mon Sep 17 00:00:00 2001
+From: "James J. Elliott" <jjellio@sandia.gov>
+Date: Mon, 19 Apr 2021 16:16:51 -0600
+Subject: [PATCH 16/16] Let CMake find undefined tools
+
+---
+ commonTools/build_stats/BuildStatsWrappers.cmake | 5 ++---
+ 1 file changed, 2 insertions(+), 3 deletions(-)
+
+diff --git a/commonTools/build_stats/BuildStatsWrappers.cmake b/commonTools/build_stats/BuildStatsWrappers.cmake
+index 31bae70457d9..bfdcd8127a96 100644
+--- a/commonTools/build_stats/BuildStatsWrappers.cmake
++++ b/commonTools/build_stats/BuildStatsWrappers.cmake
+@@ -75,9 +75,8 @@ function(generate_build_stats_wrapper_for_op op_name variable_to_set)
+   # there's an issue here - if CMAKE_FOO is unset (whatever `variable_to_set` is)
+   # we need a to know the command - but CMake hasn't chosen one yet...
+   if ("${${variable_to_set}}" STREQUAL "")
+-    message("-- " "${variable_to_set} is not set, but a wrapper has been requested. Setting to ${op_lc}")
+-    set(${variable_to_set} "${op_lc}"
+-      CACHE FILEPATH "Guessed default for ${op_name} in build stats wrapper" FORCE )
++    message("-- " "${variable_to_set} is not set, but a wrapper has been requested. Asking CMake to find ${op_lc}")
++    find_program(${variable_to_set} "${op_lc}")
+     print_var(${variable_to_set})
+   endif()
+ 

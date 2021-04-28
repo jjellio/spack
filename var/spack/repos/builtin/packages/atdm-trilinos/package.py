@@ -10,6 +10,8 @@ from textwrap import dedent
 import shlex
 import subprocess
 from spack import *
+# provides module("command", args)
+from spack.util.module_cmd import module
 from spack.pkg.builtin.kokkos import Kokkos
 import llnl.util.tty as tty
 
@@ -19,7 +21,7 @@ import llnl.util.tty as tty
 # see spack issue https://github.com/spack/spack/issues/22463
 
 
-class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
+class AtdmTrilinos(CMakePackage):
     """The Trilinos Project is an effort to develop algorithms and enabling
     technologies within an object-oriented software framework for the solution
     of large-scale, complex multi-physics engineering and scientific problems.
@@ -33,14 +35,10 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
     # ###################### Versions ##########################
 
     version('develop', branch='develop', preferred=True)
-    version('master', branch='master')
     version('13.0.1',
             sha256='0bce7066c27e83085bc189bf524e535e5225636c9ee4b16291a38849d6c2216d')
 
     # ###################### Variants ###########################
-    variant('ninja',
-            default=True,
-            description='Uses Ninja build system')
     # whether trilinos should build shared or static libraries
     variant('shared',
             default=False,
@@ -48,16 +46,50 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
     variant('tpls_shared',
             default=False,
             description='Use shared libraries for TPLs')
-    # seems this should be implied ... if shared = true, else false
-    variant('pic',
-            default=False,
-            description='Build with position independent code (-fpic)')
 
-    # sparc and/or empire packages
-    variant('sparc',  default=True,
-            description='Enable the packages SPARC uses')
-    variant('empire', default=False,
-            description='Enable the packages EMPIRE uses')
+    # this effectively enables packages
+    variant('build_for',
+            default='all',
+            values=('all', 'sparc', 'empire', 'none'),
+            multi=True,
+            description=('Build a preset for a given app.'
+                         + os.linesep
+                         + '  * all will enable all packages.'
+                         + os.linesep
+                         + '  * sparc will use the ATDM Sparc enables files.'
+                         + os.linesep
+                         + '  * empire will use the ATDM EMPIRE enables files.'
+                         + os.linesep
+                         + '  * none means no packages will be explicity enabled,'
+                         + ' and you are expected to use `extra_cmake`'))
+
+    variant('tests',
+            default=True,
+            description="Enable tests and examples")
+
+    variant('package_enables',
+            default='none',
+            values=('secondary', 'optional', 'none'),
+            multi=True,
+            description=('Define what level of package dependencies can be'
+                         + ' enabled. By defauly, "primary" tested code is enabled.'
+                         + ' when you enable a pacakge. (primary is implied and is'
+                         + ' not an option). Options may be combined.'
+                         + os.linesep
+                         + '  * secondary: enables "secondary" tested code'
+                         + os.linesep
+                         + '  * optional: enable optional packages.'
+                         + os.linesep
+                         + '  * none: only enable default primary tested code.'
+                         + os.linesep
+                         + ' See: https://docs.trilinos.org/files/'
+                         + 'TrilinosBuildReference.html Sec 5.3'))
+
+    variant('extra_cmake',
+            multi=False,
+            description=('Provide additional CMake variables (or flags).'
+                         ' Use pipe `|` to separate arguments.'),
+            default='none')
 
     # enable complex scalars
     variant('complex', default=False)
@@ -76,8 +108,29 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
             values=('serial',
                     'openmp',
                     'cuda',
-                    'rocm'),
+                    'hip'),
             description='the execution space to build')
+
+    variant('accel_target',
+            values=('v100', 'mi60', 'mi100', 'none'),
+            default='none',
+            multi=False)
+
+    depends_on('cray-pe-targets craype-host=naples craype-accel=mi60',
+               type=('build', 'link', 'run'),
+               when='exec_space=hip accel_target=mi60')
+
+    depends_on('cray-pe-targets craype-host=rome craype-accel=mi100',
+               type=('build', 'link', 'run'),
+               when='exec_space=hip accel_target=mi100')
+
+    # would be good to move this into a per-machine config
+    targets_to_kokkos_map = {'x86-naples': 'ZEN',
+                             'x86-rome':   'ZEN2',
+                             'x86-milan':  'ZEN3',
+                             'amd_gfx906': 'VEGA908',
+                             'amd_gfx908': 'VEGA906',
+                             'nvidia70':   'VOLTA70'}
 
     # specify the host side blas/lapack (it assumes they are the same)
     variant('host_lapack',
@@ -85,6 +138,8 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
             values=('libsci', 'openblas'),
             description='the host blas/lapack to use')
 
+    variant('ninja',
+            default=True)
     # adding this is causing a the package to depend on the default libsci spec
     # which will the conflict the exec_space=openmp variant
     depends_on('mpi',
@@ -113,50 +168,53 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
                when='exec_space=serial host_lapack=libsci')
 
     # ###################### Variants ##########################
+    tpl_build_type = 'Release'
     tpl_variant_map = {
         'netcdf-c': {
             'version': '',
             'variant': '~hdf4~jna~dap'  # disable dap because curl/idn2 is bugged
                        '+mpi+parallel-netcdf'
-                       ' build_type=Release'
+                       ' build_type=' + tpl_build_type
             },
         'hdf5': {
             'version': '@1.10.7',
             'variant': '~cxx~debug~threadsafe~java'
                        '+fortran+hl+mpi+szip'
-                       ' build_type=Release'
+                       ' build_type=' + tpl_build_type
             },
         'parallel-netcdf': {
             'version': '',
             'variant': '~cxx~burstbuffer'
                        '+fortran'
-                       ' build_type=Release'
+                       ' build_type=' + tpl_build_type
             },
         'parmetis': {
             'version': '@4.0.3',
-            'variant': '~gdb~ipo~int64'
-                       '+ninja'
-                       ' build_type=Release'
+            'variant': '~gdb~ipo'
+                       '+ninja+int64'
+                       ' build_type=' + tpl_build_type
             },
         'metis': {
             'version': '@5:',
-            'variant': '~gdb~int64~real64'
-                       ' build_type=Release'
+            'variant': '~gdb'
+                       '+int64~real64'
+                       ' build_type=' + tpl_build_type
             },
         'cgns': {
             'version': '',
             'variant': '~base_scope~int64~ipo~legacy~mem_debug~fortran'
                        '+hdf5+mpi+parallel+scoping+static'
-                       ' build_type=Release'
+                       ' build_type=' + tpl_build_type
             },
         'boost': {
             'version': '',
             'variant': '+system+icu cxxstd=11'
+                       ''  # Boost is neither Cmake or AutoTools
             },
         'superlu-dist': {
             'version': '@6.4.0',
             'variant': '~ipo~int64'
-                       ' build_type=Release'
+                       ' build_type=' + tpl_build_type
             },
         }
 
@@ -192,16 +250,15 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
     #                when='exec_space=serial host_lapack=libsci')
 
     patch('cray_secas.patch')
+    patch('atdm-env-add-hip.patch')
+    patch('fix-atdm-dev-env-parmetis.patch')
     # patch('shylu.patch')
-    patch('https://github.com/trilinos/Trilinos/commit/61b3d7814c3da30b0d1d5bf8b9531df8f885ce96.patch',
-          sha256='cb39b9f8503621ba8203ffa1a22081129a7905c463771ca4a8dcf6fbd0c1af7a',
-          when='+empire')
-    patch('https://github.com/trilinos/Trilinos/commit/b5e119ec92492dabaf0507a24f1bebc7ee01a381.patch',
-          sha256='1bae46a4b459ccd96181dd38ddb49767ad73f3d2657e6bd35073dd6edb97f957',
-          when='+empire')
-    patch('https://github.com/trilinos/Trilinos/commit/9872972909bf504842603006b48e37b29a02b7ba.patch',
-          sha256='eb689f06b558672844499ca1c6f0f2a672fd8aef3f4adda732ae4552868034e4',
-          when='+empire')
+    # piro include test
+    patch('https://github.com/jjellio/Trilinos/commit/a82a80df2ec982b3073a03b257fcc3688e4e0542.patch',
+          sha256='d6d1d2f6e9f4a3e2a7a30bb4b718499633ddfc20992069e3fb0b03e70a45bee4')
+    # build stats
+    patch('8638.patch',
+          sha256='0f845ed22b262a98d216954d898c8ffdaad79fbace819f9b50f5b15a177c15a1')
 
     def url_for_version(self, version):
         url = "https://github.com/trilinos/Trilinos/archive/trilinos-release-{0}.tar.gz"
@@ -209,56 +266,74 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
 
     def cmake_args(self):
         spec = self.spec
-        options = []
         define = CMakePackage.define
+        options = []
+        disable_options = {}
 
         # import traceback
         # traceback.print_stack()
-        disable_options = []
 
         # define the max number of MPI procs a test can require
-        trilinos_ci_max_num_procs = 16
+        trilinos_test_max_num_procs = 16
 
+        build_for = spec.variants['build_for']
         opt_file = 'cmake/std/atdm/ATDMDevEnv.cmake'
-        if '+empire' in spec:
+        if 'empire' in build_for:
             opt_file += ';cmake/std/atdm/apps/empire/EMPIRETrilinosEnables.cmake'
-            disable_options = ['STK_ENABLE_TESTS',
-                               'Piro_ENABLE_TESTS',
-                               'Piro_ENABLE_EXAMPLES',
-                               ]
 
-        if '+sparc' in spec:
+        if 'sparc' in build_for:
             opt_file += ';cmake/std/atdm/apps/sparc/SPARCTrilinosPackagesEnables.cmake'
 
-        if '+trace_cmake' in spec:
-            options += ['--trace-expand']
+        if 'all' in build_for:
+            options.extend([
+                define('Trilinos_ENABLE_ALL_PACKAGES', True),
+                ])
+
+        if '+tests' in spec:
+            options.extend([
+                define('Trilinos_ENABLE_TESTS', True),
+                define('Trilinos_ENABLE_EXAMPLES', True),
+                ])
+
+        package_enables = spec.variants['package_enables']
+        if 'secondary' in package_enables:
+            options.extend([
+                define('Trilinos_ENABLE_SECONDARY_TESTED_CODE', True),
+                ])
+
+        if 'optional' in package_enables:
+            options.extend([
+                define('Trilinos_ENABLE_ALL_OPTIONAL_PACKAGES', True),
+                ])
+
+        # add extra cmake parameters verbatim
+        extra_cmake = spec.variants['extra_cmake'].value
+        if extra_cmake:
+            options += [extra for extra in extra_cmake.split('|')
+                        if extra.lower() != 'none']
 
         # try to be static if asked to be
         if '~tpl_shared' in spec:
             options += [define('CMAKE_FIND_LIBRARY_SUFFIXES', '.a;.so')]
 
         options.extend([
-            define('Trilinos_ENABLE_TESTS', True),
-            define('Trilinos_ENABLE_EXAMPLES', True),
+            define('Trilinos_WARNINGS_AS_ERRORS_FLAGS', ''),
+            define('Trilinos_ALLOW_NO_PACKAGES', True),
+            define('Trilinos_DISABLE_ENABLED_FORWARD_DEP_PACKAGES', True),
+            define('Trilinos_DEPS_XML_OUTPUT_FILE', ''),
+            define('Trilinos_EXTRAREPOS_FILE', ''),
+            define('Trilinos_IGNORE_MISSING_EXTRA_REPOSITORIES', True),
+            define('Trilinos_ENABLE_KNOWN_EXTERNAL_REPOS_TYPE', 'None'),
             define('CMAKE_VERBOSE_MAKEFILE', False),
             define('CMAKE_CXX_LINK_FLAGS', '-fuse-ld=lld -Wl,--threads=8'),
             define('CMAKE_C_LINK_FLAGS', '-fuse-ld=lld -Wl,--threads=8'),
-            # define('Trilinos_ENABLE_ALL_OPTIONAL_PACKAGES', True),
-            # define('Trilinos_WARNINGS_AS_ERRORS_FLAGS', ''),
-            # define('Trilinos_ALLOW_NO_PACKAGES', True),
-            # define('Trilinos_DISABLE_ENABLED_FORWARD_DEP_PACKAGES', True),
-            # define('Trilinos_DEPS_XML_OUTPUT_FILE', ''),
-            # define('Trilinos_ENABLE_SECONDARY_TESTED_CODE', True),
-            # define('Trilinos_EXTRAREPOS_FILE', ''),
-            # define('Trilinos_IGNORE_MISSING_EXTRA_REPOSITORIES', True),
-            # define('Trilinos_ENABLE_KNOWN_EXTERNAL_REPOS_TYPE', 'None'),
-            define('Trilinos_ENABLE_ALL_PACKAGES', True),
             define('Trilinos_TRACE_ADD_TEST', True),
             define('Trilinos_ENABLE_CONFIGURE_TIMING', True),
             define('Trilinos_HOSTNAME', spec.variants['ci_hostname'].value),
             define('Trilinos_CONFIGURE_OPTIONS_FILE', opt_file),
-            define('Trilinos_ENABLE_BUILD_STATS', True),
-            define('MPI_EXEC_MAX_NUMPROCS', trilinos_ci_max_num_procs)
+            define('Trilinos_ENABLE_BUILD_STATS', False),
+            define('MPI_EXEC_MAX_NUMPROCS', trilinos_test_max_num_procs),
+            define('DART_TESTING_TIMEOUT', 200),
             ])
 
         for disable_opt in disable_options:
@@ -291,6 +366,11 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
                                               fail_on_error=False)
 
     def cmake(self, spec, prefix):
+        tty.msg("Preparing ATDM environment in setup_build_environment")
+        tty.msg("  which(mpicxx): {0}".format(which("mpicxx")))
+        spack_env_dir = self._write_spack_magic()
+        self._source_spack_magic_and_add_env(spack_env_dir, env)
+
         print("++++========== ////      ||||     \\\\\\\\ ================== ++++++")
         print(" Calling cmake hook:")
         print("Current ATDM_CONFIG_COMPLETED_ENV_SETUP = {0}"
@@ -314,6 +394,12 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
             os.system(f'cp -vr {lcl_spack_env_dir} {dest_dir}')
             os.system(f'ls -l {dest_dir}')
 
+        loaded_modules=module("list")
+        tty.msg("\n\n\n\n==========================================\n"
+                "calling cmake\n"
+                "  module list:\n "
+                "{0}"
+                "".format(loaded_modules))
         super(AtdmTrilinos, self).cmake(spec, prefix)
 
     def setup_build_environment(self, spack_env):
@@ -328,10 +414,9 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
             tty.msg("FC : %s" % spec['mpi'].mpifc)
             os.system('module list')
 
-        spack_env.set('SPACK_DEBUG', "FALSE")
-        tty.msg("Preparing ATDM environment in setup_build_environment")
-        spack_env_dir = self._write_spack_magic()
-        self._source_spack_magic_and_add_env(spack_env_dir, spack_env)
+        #tty.msg("Preparing ATDM environment in setup_build_environment")
+        #spack_env_dir = self._write_spack_magic()
+        #self._source_spack_magic_and_add_env(spack_env_dir, spack_env)
 
     def _write_spack_magic(self, spack_magic_name='spack_magic'):
         tty.msg("Generating ATDM config environment called {}".format(spack_magic_name))
@@ -549,6 +634,29 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
         # config_map = {}
         # config_lines = []
 
+        # do modules first
+        module_blob = '\n'.join(module("list -t").splitlines()[1:])
+        txt = '''
+        # module stuff
+
+        load_modules=({module_blob})
+        module load "${{load_modules[@]}}"
+        unwanted_modules=()
+        loaded_modules=($(module list -t | tail -n+2))
+        for m in "${{loaded_modules[@]}}"; do
+          valid=false
+          for valid_module in "${{load_modules[@]}}"; do
+            if [ "$valid_module" == "$m" ]; then
+              valid=true
+            fi
+          done
+          if [ "$valid" == "false" ]; then
+            module rm $m
+          fi
+        done
+        '''.format(module_blob=module_blob)
+        env_lines.append(dedent(txt))
+
         # setup our variables
         # ideally we'd like to module load tpl-exec_space, and have it do all of
         # this. Currently, spack's module naming isn't making the required
@@ -574,7 +682,7 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
             env_lines.append(dedent(txt))
 
         # this sucks - Cray provides bin utils for all CCE, but spack can't
-        # understand that ideally, you could make a package that is aware that
+        # understand that. Ideally, you could make a package that is aware that
         # it is controlled by the compiler module but if you module load CCE in
         # that package you are hosed
         # I don't know what you are supposed to do..
@@ -591,8 +699,9 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
         compiler_modules = dict.fromkeys(self.compiler.modules)
         compiler_modules = list(self.compiler.modules)
         txt = '''
-            module purge &>/dev/null
-            module load {0}
+            # can't do this yet...
+            #module purge &>/dev/null
+            #module load {0}
             '''.format(' '.join(compiler_modules))
         env_lines.append(dedent(txt))
 
@@ -601,13 +710,9 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
         # spack should really provide support for module based microarch
         # compiling. e.g., craype-x86-haswell
         if 'CRAY_CPU_TARGET' in os.environ:
-            micro_arch_map = {'x86-naples': 'ZEN',
-                              'x86-rome':   'ZEN2',
-                              'x86-milan':  'ZEN3'}
-
             # this will throw if the ENV isn't set... so spack better be nice
             # with cray!
-            kokkos_arch = micro_arch_map[os.environ['CRAY_CPU_TARGET']]
+            kokkos_arch = self.targets_to_kokkos_map[os.environ['CRAY_CPU_TARGET']]
             tty.msg('Setting Kokkos_ARCH using CrayPE ... got {0}'
                     ''.format(kokkos_arch))
         else:
@@ -616,23 +721,40 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
             tty.msg('Setting Kokkos_ARCH using spec.target.name ... got {0}'
                     ''.format(kokkos_arch))
 
-        # handle GPU stuff... todo
-        # the Cmake stuff will handle turning on exec spaces
-        # done via load-env.sh foo-openmp|cuda|serial-stuff
-        # we usually specify the kokkos arch in the env script
-        txt = '''
-            export ATDM_CONFIG_KOKKOS_ARCH="{0}"
-            '''.format(kokkos_arch)
-        env_lines.append(dedent(txt))
+        if self.spec.variants['accel_target'].value != 'none':
+            if 'CRAY_ACCEL_TARGET' in os.environ:
+                # this will throw if the ENV isn't set... so spack better be nice
+                # with cray!
+                kokkos_arch += ';' + self.targets_to_kokkos_map[os.environ['CRAY_ACCEL_TARGET']]
+                tty.msg('Setting Kokkos_ARCH using CrayPE ... got {0}'
+                        ''.format(kokkos_arch))
+            else:
+                tty.error('CRAY_ACCEL_TARGET is not defined!')
+                os.system("module list")
+                exit(-1)
+
+        import string
+        class BlankFormatter(string.Formatter):
+            def __init__(self, default=''):
+                self.default=default
+
+            def get_value(self, key, args, kwds):
+                if isinstance(key, str):
+                    return kwds.get(key, self.default)
+                else:
+                    return string.Formatter.get_value(key, args, kwds)
 
         config_map = {}
         variants = self.spec.variants
 
+        config_map['atdm_config_kokkos_arch'] = kokkos_arch
+
         config_map["ci_hostname"] = variants['ci_hostname'].value
-        config_map["mpiexec_flags"] = '--cpu-bind=cores;-c;1'
+        config_map["mpiexec_flags"] = ''
         config_map["mpiexec_np"] = '-n'
         # need to fix this
-        config_map["mpiexec"] = 'srun'
+        config_map["mpiexec"] = which('srun')
+        # markup the compilers used
         config_map["mpicc"] = self.compiler.cc
         config_map["mpicxx"] = self.compiler.cxx
         config_map["mpif90"] = self.compiler.fc
@@ -676,6 +798,29 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
         else:
             config_map["atdm_config_use_cuda"] = 'OFF'
 
+        if config_map['exec_space'] == 'hip':
+            config_map["atdm_config_use_hip"] = 'ON'
+            config_map["atdm_config_hip_root"] = env['HIP_PATH']
+
+            # this is a mixed toolchain thing...
+            config_map["atdm_config_override_mpicxx"] = which("mpicxx")
+            config_map["atdm_config_override_mpicxx_inner_compiler"] = which("hipcc")
+
+        else:
+            config_map["atdm_config_use_hip"] = 'OFF'
+            config_map["atdm_config_hip_root"] = ''
+
+        # be aware - to mimic an SNL build, we create, then source this all back in
+        # we only propagate back into the SPACK env ATDM_CONFIG variables
+        # and [A-Za-z]+_ROOT variables
+        # I've added a special case for MPICC, MPICXX, and MPIF90
+        # That list of special variables had to grow to MPICH_CXX and OMPI_CXX
+        #
+        # This is a bit of a headache. I explicitly *want* this ENV file to drive the
+        # environment - not by manually setting ENVs in spack.
+        #
+        # The gimick works by source this, matching ENVs I white list above
+        # then setting them inside spack's `env` variable
         txt = '''
             # this is an internal variable that enables the libraries common to both
             # sparc and empire ... it's name predates empire using it
@@ -693,13 +838,25 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
             #Not sure if we need these... they may get auto set
             # they are set in ats2
             # ATDM Settings
+            export ATDM_CONFIG_KOKKOS_ARCH="{atdm_config_kokkos_arch}"
             export ATDM_CONFIG_CUDA_RDC="OFF"
+            export ATDM_CONFIG_USE_HIP={atdm_config_use_hip}
             export ATDM_CONFIG_USE_CUDA={atdm_config_use_cuda}
             export ATDM_CONFIG_USE_OPENMP={atdm_config_use_openmp}
             export ATDM_CONFIG_USE_PTHREADS=OFF
             export ATDM_CONFIG_CTEST_PARALLEL_LEVEL=4
             export ATDM_CONFIG_BUILD_COUNT=60
             export ATDM_CONFIG_FPIC="OFF"
+
+            export ATDM_CONFIG_OVERRIDE_MPICXX="{atdm_config_override_mpicxx}"
+            export ATDM_CONFIG_OVERRIDE_MPICXX_INNER_COMPILER="{atdm_config_override_mpicxx_inner_compiler}"
+
+            if [ "$ATDM_CONFIG_USE_HIP" == "ON" ]; then
+              # set HIP_ROOT if it is not defined
+              : "${{HIP_ROOT:={atdm_config_hip_root}}}"
+              export HIP_ROOT
+              export ATDM_CONFIG_HIP_ROOT="$HIP_ROOT"
+            fi
 
             # Kokkos Settings
             export ATDM_CONFIG_Kokkos_ENABLE_SERIAL=ON
@@ -709,6 +866,18 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
             export MPICC="{mpicc}"
             export MPICXX="{mpicxx}"
             export MPIF90="{mpif90}"
+
+            # allow the the compilers to be overrriden
+            if [ "$ATDM_CONFIG_OVERRIDE_MPICXX" != "" ]; then
+              export MPICXX="$ATDM_CONFIG_OVERRIDE_MPICXX"
+            fi
+            if [ "$ATDM_CONFIG_OVERRIDE_MPICXX_INNER_COMPILER" != "" ]; then
+              export OMPI_CXX="$ATDM_CONFIG_OVERRIDE_MPICXX_INNER_COMPILER"
+              export MPICH_CXX="$ATDM_CONFIG_OVERRIDE_MPICXX_INNER_COMPILER"
+            fi
+
+            echo "MPICXX=$MPICXX"
+            echo "MPICH_CXX=$MPICH_CXX"
 
             export ATDM_CONFIG_MPI_EXEC="{mpiexec}"
 
@@ -741,7 +910,9 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
 
             # this must be set
             export ATDM_CONFIG_COMPLETED_ENV_SETUP="TRUE"
-        '''.format(**config_map)
+        '''
+        fmt = BlankFormatter()
+        txt = fmt.format(txt,**config_map)
         env_lines.append(dedent(txt))
 
         return '\n'.join(env_lines)
@@ -779,7 +950,7 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
 
             if re.match('^ATDM_.*$', key):
                 add_value = True
-            elif re.match('^(MPICC|MPICXX|MPIFC)$', key):
+            elif re.match('^(MPICC|MPICXX|MPI90|MPICH_CXX|OMPI_CXX)$', key):
                 add_value = True
             elif re.match('^.*_ROOT$', key):
                 tty.msg("=======++++++ ----- <<<< >>>>>> Found a Root {0}"
@@ -829,14 +1000,18 @@ class AtdmTrilinos(CMakePackage, CudaPackage, ROCmPackage):
 
     @run_after('build')
     def check(self):
-        timeout = '--test-timeout 300'
+        timeout = ['--test-timeout 300', '--timeout 300']
         with working_dir(self.build_directory):
+            opts = ['-j 8'] + timeout
             tty.debug("Preparing to run tests, -j 8 first")
-            ctest('-j 8', timeout, fail_on_error=False)
+            ctest(*opts, fail_on_error=False)
             tty.debug("Preparing to rerun-failed tests, -j 4 first")
-            ctest('--rerun-failed', timeout, '-j 4', fail_on_error=False)
+            opts = ['--rerun-failed', '-j 4'] + timeout
+            ctest(*opts, fail_on_error=False)
             tty.debug("Preparing to rerun-failed tests, -j 1 first")
-            ctest('-VV', timeout, '--rerun-failed', '-j 1', fail_on_error=False)
+            opts = ['-VV', '--rerun-failed', '-j 1'] + timeout
+            # we'll fail if it does
+            ctest(*opts)
 
     def _find_libraries(self,
                         dep_name,

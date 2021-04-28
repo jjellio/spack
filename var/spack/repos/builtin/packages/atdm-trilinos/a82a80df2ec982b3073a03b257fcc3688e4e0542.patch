@@ -1,0 +1,21 @@
+From a82a80df2ec982b3073a03b257fcc3688e4e0542 Mon Sep 17 00:00:00 2001
+From: "James J. Elliott" <jjellio@sandia.gov>
+Date: Thu, 15 Apr 2021 17:08:03 -0600
+Subject: [PATCH] Add missing include
+
+---
+ .../piro/test/Piro_TempusSolver_SensitivitySinCosUnitTests.cpp   | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/packages/piro/test/Piro_TempusSolver_SensitivitySinCosUnitTests.cpp b/packages/piro/test/Piro_TempusSolver_SensitivitySinCosUnitTests.cpp
+index 6e986fde4c82..c7e4a1b7e9fe 100644
+--- a/packages/piro/test/Piro_TempusSolver_SensitivitySinCosUnitTests.cpp
++++ b/packages/piro/test/Piro_TempusSolver_SensitivitySinCosUnitTests.cpp
+@@ -60,6 +60,7 @@
+ #include "Teuchos_Ptr.hpp"
+ #include "Teuchos_Array.hpp"
+ #include "Teuchos_Tuple.hpp"
++#include "Teuchos_DefaultComm.hpp"
+ #include "Piro_Helpers.hpp" 
+ 
+ #include <stdexcept>
