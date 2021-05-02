@@ -1,0 +1,116 @@
+policy:
+  # atdm-trilinos creates an ATDM environment.sh
+  # we source that file (in a subshell) then capture
+  # only whitelisted modifications back into SPACK's
+  # build environment.
+  # This variable defines the regex that is used to
+  # determine if a variable should be captured.
+  atdm_env_to_spack: '^(ATDM_.*|.*_ROOT|MPICC|MPICXX|MPIF90|MPICH_CXX|OMPI_CXX)$'
+  atdm_env:
+    ATDM_CONFIG_CTEST_PARALLEL_LEVEL: 4
+    ATDM_CONFIG_BUILD_COUNT: 200
+    ATDM_CONFIG_MPI_EXEC: srun
+    ATDM_CONFIG_MPI_POST_FLAGS:
+    ATDM_CONFIG_MPI_EXEC_NUMPROCS_FLAG: '-n'
+  exec_spaces:
+    - serial
+  accel_targets:
+    - none
+  tpls:
+    superlu-dist:
+      atdm_name: SUPERLUDIST
+      version: '@6.4.0'
+      variant: ~ipo~int64
+      depends: lapack
+      shared: +shared
+      static: ~shared
+      supports_build_type: True
+      exec_space:
+        serial:
+          variant: ~openmp
+        openmp:
+          variant: +openmp
+        cuda:
+          variant: +openmp
+        hip:
+          variant: +openmp
+    cgns:
+      atdm_name: CGNS
+      version:
+      variant: ~base_scope~int64~ipo~legacy~mem_debug~fortran+hdf5+mpi+parallel+scoping
+      shared: +shared
+      static: ~shared
+      supports_build_type: True
+    boost:
+      atdm_name: BOOST
+      version:
+      variant: +system+icu cxxstd=14
+      shared: +shared
+      static: ~shared
+      supports_build_type: False
+    metis:
+      atdm_name: METIS
+      # quote because of the colon
+      version: '@5:'
+      variant: ~gdb~real64+int64
+      shared: +shared
+      static: ~shared
+      supports_build_type: True
+    parmetis:
+      atdm_name: PARMETIS
+      version: '@4.0.3'
+      # int64 needs to match metis
+      variant: ~gdb~ipo+int64
+      shared: +shared
+      static: ~shared
+      supports_build_type: True
+    parallel-netcdf:
+      atdm_name: PNETCDF
+      version:
+      variant: ~cxx~burstbuffer+fortran
+      shared: +shared
+      static: ~shared
+      supports_build_type: True
+    hdf5:
+      atdm_name: HDF5
+      version: '@1.10.7'
+      variant: ~cxx~debug~threadsafe~java+fortran+hl+mpi+szip
+      shared: +shared
+      static: ~shared
+      supports_build_type: True
+    netcdf-c:
+      atdm_name: NETCDF
+      version:
+      variant: '~hdf4~jna+dap+mpi+parallel-netcdf'
+      shared: +shared
+      static: ~shared
+      supports_build_type: True
+    binutils:
+      atdm_name: BINUTILS
+      version:
+      variants: +gold+headeres+ld+libiberty+lto+nls+plugins
+      shared:
+      static:
+      supports_build_type: True
+    lapack:
+      atdm_name: LAPACK
+      openblas:
+        version:
+        variant: ~bignuma~consistent_fpcsr~ilp64
+        shared: +shared
+        static: ~shared
+        supports_build_type: False
+        exec_space:
+          serial:
+            variant: ~locking threads=none
+          openmp:
+            variant: +locking threads=openmp
+          cuda:
+            variant: +locking threads=openmp
+          hip:
+            variant: +locking threads=openmp
+    blas:
+      atdm_name: BLAS
+      is_lapack: True
+    mpi:
+      atdm_name: MPI

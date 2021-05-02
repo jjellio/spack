@@ -9,18 +9,111 @@ import re
 from textwrap import dedent
 import shlex
 import subprocess
+from pprint import pprint
+from spack.util import spack_yaml as s_yaml
 from spack import *
 # provides module("command", args)
 from spack.util.module_cmd import module
 from spack.pkg.builtin.kokkos import Kokkos
 import llnl.util.tty as tty
 
+import collections
+
+
+def _atdmtrilinos_load_yaml(file_name, yaml_key=None):
+    try:
+        with open(file_name) as fptr:
+            yaml_data = s_yaml.load(fptr)
+            if yaml_key and isinstance(yaml_key, str):
+                return yaml_data[yaml_key]
+            else:
+                return yaml_data
+
+    except IOError:
+        tty.die("Error reading %s" % file_name)
+
+
+def _atdmtrilinos_recursive_update(d, u):
+    for k in u:
+        v = u[k]
+        if isinstance(v, collections.Mapping):
+            d[k] = _atdmtrilinos_recursive_update(d.get(k, {}), v)
+        else:
+            # append notes
+            if k == 'note' and k in d:
+                d[k] = ('All platforms: {0}. [Platform specific note]: {1}'
+                        ''.format(d[k], v))
+            else:
+                d[k] = v
+    return d
+
+
+def _atdmtrilinos_load_config(platform_name):
+    # this is pretty ugly...
+    pkg_dir = os.path.abspath(os.path.dirname(__file__))
+
+    policy_file = '{0}/policy.yaml'.format(pkg_dir)
+    policy = _atdmtrilinos_load_yaml(policy_file, 'policy')
+    platform_file = '{0}/platform/{1}.yaml'.format(pkg_dir, platform_name)
+    platform_config = _atdmtrilinos_load_yaml(platform_file, 'platform')
+
+    config = _atdmtrilinos_recursive_update(policy, platform_config[platform_name])
+
+    # we want to massage the config slightly. Virtual packages allow multiple
+    # options, but any top level values (that aren't dicts) should be set
+    # inside the children
+    virtual_packages = ['mpi', 'lapack', 'blas']
+    for vpkg in virtual_packages:
+        _vconf = config['tpls'].get(vpkg, None)
+        if not _vconf:
+            continue
+        vals = {}
+        for k in _vconf:
+            v = _vconf[k]
+            if not isinstance(v, collections.Mapping):
+                vals[k] = v
+
+        # handle the case of no specs (e.g., blas == lapack)
+        if len(_vconf) == len(vals):
+            # nothing to do, there are no specs
+            # so the current dict is all there is
+            # add a sentinel value so we know not to expose
+            # this to the user
+            _vconf['_disable_variant'] = True
+            continue
+
+        # if there are specs, then delete the non dicts
+        # and copy the single values into the nested dicts
+        for k in vals:
+            del _vconf[k]
+
+        for spec in _vconf:
+            v = _vconf[spec]
+            for k in vals:
+                if k in v:
+                    tty.die('Found duplicate key in top-level virtual package'
+                            ' {0} and spec {1}. Key={2}'.format(vpkg, spec, k))
+                v[k] = vals[k]
+
+    pprint(config)
+    return config
+
+
+def _atdmtrilinos_default_in_dict(search_map):
+    # choose an arbitrary default
+    default = list(search_map.keys())[0]
+    if len(search_map) == 1:
+        return default
+    # if there is more than 1 look for a default property
+    for k in search_map:
+        if search_map[k].get('default', False):
+            return k
+
+
 # This pacakge requires the clingo concretizer in spack
 # to enable it,  spack config add "config:concretizer:clingo"
 # it requires a GCC to install.
 # see spack issue https://github.com/spack/spack/issues/22463
-
-
 class AtdmTrilinos(CMakePackage):
     """The Trilinos Project is an effort to develop algorithms and enabling
     technologies within an object-oriented software framework for the solution
@@ -31,6 +124,8 @@ class AtdmTrilinos(CMakePackage):
     git = "https://github.com/trilinos/Trilinos.git"
 
     maintainers = ['jjellio']
+
+    platform_name = 'redwood'
 
     # ###################### Versions ##########################
 
@@ -98,48 +193,53 @@ class AtdmTrilinos(CMakePackage):
     # (as you should!)
     variant('ci_hostname',
             multi=False,
-            default='redwood')
+            default=platform_name)
+
+    tty.msg("Unifying policy and platform...")
+    atdm_config = _atdmtrilinos_load_config(platform_name)
 
     # control the execution space used
     # for now this is a single value variant
     # it's possible we may use multiple in the future
     # in general, if you enable openmp/cuda/rocm you always get serial as well
-    variant('exec_space', default='serial',
-            values=('serial',
-                    'openmp',
-                    'cuda',
-                    'hip'),
-            description='the execution space to build')
+    __platform_exec_spaces = atdm_config['exec_spaces']
+    variant('exec_space',
+            values=tuple(__platform_exec_spaces),
+            default=__platform_exec_spaces[0],
+            description='the execution space to build.')
 
+    __platform_accel_targets = atdm_config['accel_targets']
     variant('accel_target',
-            values=('v100', 'mi60', 'mi100', 'none'),
-            default='none',
+            values=tuple(__platform_accel_targets),
+            default=__platform_accel_targets[0],
             multi=False)
 
-    depends_on('cray-pe-targets craype-host=naples craype-accel=mi60',
-               type=('build', 'link', 'run'),
-               when='exec_space=hip accel_target=mi60')
-
-    depends_on('cray-pe-targets craype-host=rome craype-accel=mi100',
-               type=('build', 'link', 'run'),
-               when='exec_space=hip accel_target=mi100')
-
-    # would be good to move this into a per-machine config
-    targets_to_kokkos_map = {'x86-naples': 'ZEN',
-                             'x86-rome':   'ZEN2',
-                             'x86-milan':  'ZEN3',
-                             'amd_gfx906': 'VEGA908',
-                             'amd_gfx908': 'VEGA906',
-                             'nvidia70':   'VOLTA70'}
+    # apply platform depenedencies.
+    for depends in atdm_config.get('depends_on', []):
+        depends_on(depends['constraint'],
+                   type=tuple(depends['type']),
+                   when=depends['when'])
 
     # specify the host side blas/lapack (it assumes they are the same)
-    variant('host_lapack',
-            default='libsci',
-            values=('libsci', 'openblas'),
-            description='the host blas/lapack to use')
+    __platform_lapacks = atdm_config['tpls']['lapack']
+    if not __platform_lapacks.get('_disable_variant', False):
+        __platform_lapacks_default = _atdmtrilinos_default_in_dict(__platform_lapacks)
 
-    variant('ninja',
-            default=True)
+        variant('host_lapack',
+                default=__platform_lapacks_default,
+                values=tuple(__platform_lapacks.keys()),
+                description='the host blas/lapack to use')
+
+    # specify the mpi (if any)
+    __platform_mpis = atdm_config['tpls']['mpi']
+    if not __platform_mpis.get('_disable_variant', False):
+        __platform_mpis_default = _atdmtrilinos_default_in_dict(__platform_mpis)
+
+        variant('mpi_impl',
+                default=__platform_mpis_default,
+                values=tuple(__platform_mpis.keys()),
+                description='the MPI implementation to use')
+
     # adding this is causing a the package to depend on the default libsci spec
     # which will the conflict the exec_space=openmp variant
     depends_on('mpi',
@@ -149,15 +249,18 @@ class AtdmTrilinos(CMakePackage):
     depends_on('lapack',
                type=('build', 'link', 'run'))
 
+    # general dependencies (not in the policy, but they could be)
+    # given El Cap will require CMake 3.20 maybe it makes sense
     # we need cmake at +3.19.x for CCE support
     depends_on('cmake@3.19:')
     # my cmake package has a +ninja... maybe that should get committed upstream
-    depends_on('ninja@kitware', when='+ninja')
+    depends_on('ninja@kitware')
 
     depends_on('python@3:',
-               type=('build', 'link', 'run'))
+               type=('build', 'run'))
     depends_on('perl',
-               type=('build', 'link', 'run'))
+               type=('build', 'run'))
+
     # ###################### Host Lapack/Blas ##################
     depends_on('cray-libsci~mpi+shared+openmp',
                type=('build', 'link', 'run'),

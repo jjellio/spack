@@ -1,0 +1,74 @@
+platform:
+  redwood:
+    # default value will be the top
+    exec_spaces:
+      - serial
+      - openmp
+      - cuda
+      - hip
+    accel_targets:
+      - none
+      - mi60
+      - mi100
+      - v100
+    # map cray targets to Kokkos
+    targets_to_kokkos_map:
+      x86-naples: ZEN
+      x86-rome:   ZEN2
+      x86-milan:  ZEN3
+      amd_gfx906: VEGA908
+      amd_gfx908: VEGA906
+      nvidia70:   VOLTA70
+    # default is spack via Kokkos module
+    # Kokkos.spack_micro_arch_map[self.spec.target.name]
+    target_lookup:
+      env:
+        cpu: CRAY_CPU_TARGET
+        accel: CRAY_ACCEL_TARGET
+        spack_fallback: True
+    depends_on:
+      - constraint: 'cray-pe-targets craype-host=naples craype-accel=mi60'
+        type: [build, link, run]
+        when: 'exec_space=hip accel_target=mi60'
+      - constraint: 'cray-pe-targets craype-host=rome craype-accel=mi100'
+        type: [build, link, run]
+        when: 'exec_space=hip accel_target=mi100'
+    atdm_env:
+      ATDM_CONFIG_CTEST_PARALLEL_LEVEL: 4
+      ATDM_CONFIG_BUILD_COUNT: 200
+      ATDM_CONFIG_MPI_EXEC: srun
+      ATDM_CONFIG_MPI_POST_FLAGS:
+      ATDM_CONFIG_MPI_EXEC_NUMPROCS_FLAG: '-n'
+    tpls:
+      # test each, first look for an `exec_space` dict
+      # look for env|spec
+      binutils:
+        note: Binutils is provided by cray without a module.
+        use_spack: False
+        env:
+            BINUTILS_ROOT: CRAY_BINUTILS_ROOT
+        ATDM_CONFIG_BINUTILS_LIBS: '-L$BINUTILS_ROOT/lib;-lbfd'
+        ATDM_CONFIG_BINUTILS_INCLUDE_DIRS: '$BINUTILS_ROOT/include'
+      lapack:
+        cray-libsci:
+          default: True
+          note: Libsci cannot be linked static on Shasta systems
+          version:
+          variant: ~mpi
+          shared: +shared
+          # redwood requires shared
+          static: +shared
+          required_linkage: shared
+          supports_build_type: False
+          exec_space:
+            serial:
+              variant: ~openmp
+            openmp:
+              variant: +openmp
+            cuda:
+              variant: +openmp
+            hip:
+              variant: +openmp
+      netcdf-c:
+        note: 'Currently curl is broken because of idn2 (when building through spack), this requires DAP be disabled for now.'
+        variant: '~hdf4~jna~dap+mpi+parallel-netcdf'
