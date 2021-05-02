@@ -639,6 +639,7 @@ class AtdmTrilinos(CMakePackage):
         txt = '''
         # module stuff
 
+        module purge
         load_modules=({module_blob})
         module load "${{load_modules[@]}}"
         unwanted_modules=()
@@ -1139,7 +1140,6 @@ class AtdmTrilinos(CMakePackage):
 
             if need_fix:
                 tty.msg(f"Adjusting TPL: {tpl} Making all sci_cray libraries shared if they are static")
-                new_l_prefix = ' '.join([f'-L{d}' for d in lib_dirs[tpl]])
                 new_libs = []
                 for l in libs[tpl]:
                     for blacklisted in blacklist_static:
@@ -1148,9 +1148,12 @@ class AtdmTrilinos(CMakePackage):
                             m = re.match(r'^lib(?P<name>.*)\.a', libname)
                             if m:
                                 new_l = m.group('name')
+                                # prefix the library with the search path... I guess we
+                                # could swap to .so and hope for the best?
+                                new_l_pref = ['-L{0}'.format(d) for d in lib_dirs[tpl]]
                                 new_l = f'-l{new_l}'
                                 tty.msg(f"{l} => {new_l}")
-                                new_libs.append(new_l)
+                                new_libs += new_l_pref + [new_l]
                             else:
                                 tty.msg('WTF: matched {0}, but failed to match lib{1}.a'
                                         ''.format(blacklisted, libname))
