@@ -16,12 +16,14 @@ policy:
     - serial
   accel_targets:
     - none
+  # I don't think this can be a variant because I need the value
+  tpl_build_type: Release
   tpls:
     superlu-dist:
       atdm_name: SUPERLUDIST
       version: '@6.4.0'
       variant: ~ipo~int64
-      depends: lapack
+      #depends: lapack
       shared: +shared
       static: ~shared
       supports_build_type: True
@@ -36,14 +38,14 @@ policy:
           variant: +openmp
     cgns:
       atdm_name: CGNS
-      version:
+      version: ''
       variant: ~base_scope~int64~ipo~legacy~mem_debug~fortran+hdf5+mpi+parallel+scoping
       shared: +shared
       static: ~shared
       supports_build_type: True
     boost:
       atdm_name: BOOST
-      version:
+      version: ''
       variant: +system+icu cxxstd=14
       shared: +shared
       static: ~shared
@@ -66,36 +68,36 @@ policy:
       supports_build_type: True
     parallel-netcdf:
       atdm_name: PNETCDF
-      version:
+      version: ''
       variant: ~cxx~burstbuffer+fortran
       shared: +shared
       static: ~shared
-      supports_build_type: True
+      supports_build_type: False
     hdf5:
       atdm_name: HDF5
       version: '@1.10.7'
       variant: ~cxx~debug~threadsafe~java+fortran+hl+mpi+szip
       shared: +shared
       static: ~shared
-      supports_build_type: True
+      supports_build_type: False
     netcdf-c:
       atdm_name: NETCDF
-      version:
+      version: ''
       variant: '~hdf4~jna+dap+mpi+parallel-netcdf'
       shared: +shared
       static: ~shared
-      supports_build_type: True
+      supports_build_type: False
     binutils:
       atdm_name: BINUTILS
-      version:
-      variants: +gold+headeres+ld+libiberty+lto+nls+plugins
-      shared:
-      static:
-      supports_build_type: True
+      version: ''
+      variant: +gold+headers+ld+libiberty+lto+nls+plugins
+      shared: ''
+      static: ''
+      supports_build_type: False
     lapack:
       atdm_name: LAPACK
       openblas:
-        version:
+        version: ''
         variant: ~bignuma~consistent_fpcsr~ilp64
         shared: +shared
         static: ~shared

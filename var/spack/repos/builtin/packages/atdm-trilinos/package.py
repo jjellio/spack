@@ -48,25 +48,19 @@ def _atdmtrilinos_recursive_update(d, u):
     return d
 
 
-def _atdmtrilinos_load_config(platform_name):
-    # this is pretty ugly...
-    pkg_dir = os.path.abspath(os.path.dirname(__file__))
-
-    policy_file = '{0}/policy.yaml'.format(pkg_dir)
-    policy = _atdmtrilinos_load_yaml(policy_file, 'policy')
-    platform_file = '{0}/platform/{1}.yaml'.format(pkg_dir, platform_name)
-    platform_config = _atdmtrilinos_load_yaml(platform_file, 'platform')
-
-    config = _atdmtrilinos_recursive_update(policy, platform_config[platform_name])
-
-    # we want to massage the config slightly. Virtual packages allow multiple
-    # options, but any top level values (that aren't dicts) should be set
-    # inside the children
-    virtual_packages = ['mpi', 'lapack', 'blas']
-    for vpkg in virtual_packages:
+def _atdmtrilinos_massage_virtual_packages(config):
+    '''
+    We want to massage the config slightly. Virtual packages allow multiple
+    options, but any top level values (that aren't dicts) should be set
+    inside the children
+    '''
+    for vpkg in config['virtual_packages']:
         _vconf = config['tpls'].get(vpkg, None)
         if not _vconf:
             continue
+        # make a copy of any non-collection data do this in two steps so we can
+        # determine if there is anything left. If none, then that means we
+        # won't use spack to drive any top-level constraints
         vals = {}
         for k in _vconf:
             v = _vconf[k]
@@ -74,19 +68,26 @@ def _atdmtrilinos_load_config(platform_name):
                 vals[k] = v
 
         # handle the case of no specs (e.g., blas == lapack)
-        if len(_vconf) == len(vals):
+        # vitrual packages are organized
+        # vpkg : { something1 : { stuff }
+        #        { something2 : { more stuff }
+        #
+        # if _vconf == vals, then that means vpkg has no internal dicts
+        contains_no_packages = len(_vconf) == len(vals)
+        if contains_no_packages:
             # nothing to do, there are no specs
-            # so the current dict is all there is
             # add a sentinel value so we know not to expose
-            # this to the user
+            # this does *not* mean spack does not provide this variant
+            # use_spack=False means spack does nothing. '_disable_variant'
+            # means that this package is disabled for the sake of top-level
+            # constraints and exposing.
             _vconf['_disable_variant'] = True
             continue
 
-        # if there are specs, then delete the non dicts
-        # and copy the single values into the nested dicts
+        # Delete the non dicts from the virtual package
         for k in vals:
             del _vconf[k]
-
+        # Copy in the non-collection data
         for spec in _vconf:
             v = _vconf[spec]
             for k in vals:
@@ -95,6 +96,26 @@ def _atdmtrilinos_load_config(platform_name):
                             ' {0} and spec {1}. Key={2}'.format(vpkg, spec, k))
                 v[k] = vals[k]
 
+
+def _atdmtrilinos_load_config(platform_name):
+    # this is pretty ugly...
+    pkg_dir = os.path.abspath(os.path.dirname(__file__))
+
+    pkg_dir2 = os.path.join(spack.paths.packages_path, 'packages/atdm-trilinos')
+
+    print('{0}\n{1}\n'.format(pkg_dir, pkg_dir2))
+
+    policy_file = '{0}/policy.yaml'.format(pkg_dir)
+    policy = _atdmtrilinos_load_yaml(policy_file, 'policy')
+    platform_file = '{0}/platform/{1}.yaml'.format(pkg_dir, platform_name)
+    platform_config = _atdmtrilinos_load_yaml(platform_file, 'platform')
+
+    config = _atdmtrilinos_recursive_update(policy, platform_config[platform_name])
+    config['platform'] = platform_name
+    config['platform_file'] = platform_file
+
+    config['virtual_packages'] = set(['mpi', 'lapack', 'blas'])
+    _atdmtrilinos_massage_virtual_packages(config)
     pprint(config)
     return config
 
@@ -104,10 +125,159 @@ def _atdmtrilinos_default_in_dict(search_map):
     default = list(search_map.keys())[0]
     if len(search_map) == 1:
         return default
+    print(search_map)
     # if there is more than 1 look for a default property
     for k in search_map:
         if search_map[k].get('default', False):
             return k
+
+
+def _atdmtrilinos_compose_exec_space_depends_helper(config,
+                                                    tpl,
+                                                    tpl_d,
+                                                    exec_spaces,
+                                                    tpl_build_type,
+                                                    constraint_list,
+                                                    virtual_pkg=None):
+
+    vpkg_when = ''
+    if virtual_pkg and virtual_pkg == 'lapack':
+        vpkg_when = 'host_lapack={0}'.format(tpl)
+
+    # an internal property can be set if we shouldn't do anything
+    # this happens if lapack == blas (tne you can skip one)
+    # it also happens when a tpl is not provided through spack
+    print(f"tpl={tpl} tpl_d={tpl_d}")
+    if (tpl_d.get('_disable_variant', False)
+        or
+        tpl_d.get('use_spack', False)):
+        return
+
+    vals = {'tpl':        tpl,
+            'version':    tpl_d.get('version', ''),
+            'build_type': 'build_type=' + tpl_d.get('build_type', tpl_build_type),
+            'shared':     tpl_d.get('shared', ''),
+            'static':     tpl_d.get('static', ''),
+            'variant':    tpl_d.get('variant', ''),
+            'vpkg_when':  vpkg_when}
+
+    # not all packages support a build_type option if the package does not
+    # identify it does, then assume it doesn't
+    if not tpl_d.get('supports_build_type', False):
+        print("supports_build_type = ", tpl_d['supports_build_type'])
+        vals['build_type'] = ''
+
+    if 'exec_space' not in tpl_d:
+        txt = '''
+            depends_on('{tpl}{version} {build_type} {shared}{variant}',
+                       when='+tpls_shared {vpkg_when}')
+
+            depends_on('{tpl}{version} {build_type} {static}{variant}',
+                       when='~tpls_shared {vpkg_when}')
+            '''.format(**vals)
+        o = [{'constraint': '{tpl}{version} {build_type} {shared}{variant}'
+                            ''.format(**vals),
+              'when':       '+tpls_shared {vpkg_when}'
+                            ''.format(**vals)},
+             {'constraint': '{tpl}{version} {build_type} {static}{variant}'
+                            ''.format(**vals),
+              'when':       '~tpls_shared {vpkg_when}'
+                            ''.format(**vals)}]
+        constraint_list.extend(o)
+        print(txt)
+        return
+
+    pkg_execs = set(tpl_d['exec_space'].keys())
+    if pkg_execs != exec_spaces:
+        undefined_spaces = list(exec_spaces - pkg_execs)
+        tty.die("Fatal:\n"
+                "Policy file for {platform}: {platform_file} \n"
+                "Specifies execution space variants, but does not"
+                " provide all execution spaces defined for the platform."
+                " The policy **must** define all execution spaces"
+                " listed in the platform's `exec_spaces`. This is"
+                " required to avoid constructing impossible constraints.\n\n"
+                "Platform exec_spaces: {exec_spaces}\n"
+                "Pkg defined spaces: {pkg_execs}\n"
+                "Undefined spaces: {undefined_spaces}\n"
+                .format(platform=config['platform'],
+                        platform_file=config['platform_file'],
+                        exec_spaces=','.join(exec_spaces),
+                        pkg_execs=','.join(pkg_execs),
+                        undefined_spaces=','.join(undefined_spaces)))
+    for exec_space in pkg_execs:
+        # this isn't well defined.  I think we should 'merge' whatever is
+        # in the exec_space dict into the top-level 'vals' dict
+        # variant is additive, the others overwrite
+        # this would allow specifiying shared/static linkage based on exec
+        # space, or twiddling a version (not fully thought out)
+        pkg_exec_d = tpl_d['exec_space'][exec_space]
+
+        new_vals = {'tpl': tpl,
+                    # the the value to anything in the exec_space dict
+                    # or if none, default to the top-level
+                    'version':    pkg_exec_d.get('version', vals['version']),
+                    'build_type': vals['build_type'],
+                    'shared':     pkg_exec_d.get('shared', vals['shared']),
+                    'static':     pkg_exec_d.get('static', vals['static']),
+                    'variant':    vals['variant'] + pkg_exec_d.get('variant', ''),
+                    'exec_space': exec_space,
+                    'vpkg_when':  vpkg_when}
+
+        txt = '''
+             depends_on('{tpl}{version} {build_type} {shared}{variant}',
+                        when='+tpls_shared exec_space={exec_space} {vpkg_when}')
+
+             depends_on('{tpl}{version} {build_type} {static}{variant}',
+                        when='~tpls_shared exec_space={exec_space} {vpkg_when}')
+             '''.format(**new_vals)
+        print(txt)
+        o = [{'constraint': '{tpl}{version} {build_type} {shared}{variant}'
+                            ''.format(**new_vals),
+              'when':       '+tpls_shared exec_space={exec_space} {vpkg_when}'
+                            ''.format(**new_vals)},
+             {'constraint': '{tpl}{version} {build_type} {static}{variant}'
+                            ''.format(**new_vals),
+              'when':       '~tpls_shared exec_space={exec_space} {vpkg_when}'
+                            ''.format(**new_vals)}]
+        constraint_list.extend(o)
+
+
+def _atdmtrilinos_compose_exec_space_depends(config):
+    # this will be a list or str
+    exec_spaces = config['exec_spaces']
+    tpl_build_type = config['tpl_build_type']
+    if isinstance(exec_spaces, str):
+        exec_spaces = [exec_spaces]
+    exec_spaces = set(exec_spaces)
+
+    # create a list of `{constraint: thing, when: thing}`
+    tpls = config['tpls']
+    constraint_list = []
+    for tpl, tpl_d in tpls.items():
+        if tpl_d.get('_disable_variant', False):
+            continue
+
+        if tpl in config['virtual_packages']:
+            vpkg = tpl
+            for vtpl, vtpl_d in tpls[vpkg].items():
+                if vtpl_d.get('_disable_variant', False):
+                    continue
+                _atdmtrilinos_compose_exec_space_depends_helper(config,
+                                                                vtpl,
+                                                                vtpl_d,
+                                                                exec_spaces,
+                                                                tpl_build_type,
+                                                                constraint_list,
+                                                                virtual_pkg=vpkg)
+        else:
+            _atdmtrilinos_compose_exec_space_depends_helper(config,
+                                                            tpl,
+                                                            tpl_d,
+                                                            exec_spaces,
+                                                            tpl_build_type,
+                                                            constraint_list)
+    return constraint_list
 
 
 # This pacakge requires the clingo concretizer in spack
@@ -188,6 +358,7 @@ class AtdmTrilinos(CMakePackage):
 
     # enable complex scalars
     variant('complex', default=False)
+
     # used with the CI work... will post results as coming from
     # hostname = ci_hostname, this is needed if you build on a node
     # (as you should!)
@@ -214,12 +385,6 @@ class AtdmTrilinos(CMakePackage):
             default=__platform_accel_targets[0],
             multi=False)
 
-    # apply platform depenedencies.
-    for depends in atdm_config.get('depends_on', []):
-        depends_on(depends['constraint'],
-                   type=tuple(depends['type']),
-                   when=depends['when'])
-
     # specify the host side blas/lapack (it assumes they are the same)
     __platform_lapacks = atdm_config['tpls']['lapack']
     if not __platform_lapacks.get('_disable_variant', False):
@@ -240,8 +405,7 @@ class AtdmTrilinos(CMakePackage):
                 values=tuple(__platform_mpis.keys()),
                 description='the MPI implementation to use')
 
-    # adding this is causing a the package to depend on the default libsci spec
-    # which will the conflict the exec_space=openmp variant
+    # general virtual dependencies
     depends_on('mpi',
                type=('build', 'link', 'run'))
     depends_on('blas',
@@ -261,96 +425,21 @@ class AtdmTrilinos(CMakePackage):
     depends_on('perl',
                type=('build', 'run'))
 
-    # ###################### Host Lapack/Blas ##################
-    depends_on('cray-libsci~mpi+shared+openmp',
-               type=('build', 'link', 'run'),
-               when='host_lapack=libsci exec_space=openmp')
+    # apply platform depenedencies.
+    for depends in atdm_config.get('depends_on', []):
+        depends_on(depends['constraint'],
+                   type=tuple(depends['type']),
+                   when=depends['when'])
+    # apply TPL dependencies
+    for dep in _atdmtrilinos_compose_exec_space_depends(atdm_config):
+        print("""
+              +depends_on('{constraint}',
+                         when='{when}')
+              """.format(**dep))
 
-    depends_on('cray-libsci~mpi+shared~openmp',
-               type=('build', 'link', 'run'),
-               when='exec_space=serial host_lapack=libsci')
-
-    # ###################### Variants ##########################
-    tpl_build_type = 'Release'
-    tpl_variant_map = {
-        'netcdf-c': {
-            'version': '',
-            'variant': '~hdf4~jna~dap'  # disable dap because curl/idn2 is bugged
-                       '+mpi+parallel-netcdf'
-                       ' build_type=' + tpl_build_type
-            },
-        'hdf5': {
-            'version': '@1.10.7',
-            'variant': '~cxx~debug~threadsafe~java'
-                       '+fortran+hl+mpi+szip'
-                       ' build_type=' + tpl_build_type
-            },
-        'parallel-netcdf': {
-            'version': '',
-            'variant': '~cxx~burstbuffer'
-                       '+fortran'
-                       ' build_type=' + tpl_build_type
-            },
-        'parmetis': {
-            'version': '@4.0.3',
-            'variant': '~gdb~ipo'
-                       '+ninja+int64'
-                       ' build_type=' + tpl_build_type
-            },
-        'metis': {
-            'version': '@5:',
-            'variant': '~gdb'
-                       '+int64~real64'
-                       ' build_type=' + tpl_build_type
-            },
-        'cgns': {
-            'version': '',
-            'variant': '~base_scope~int64~ipo~legacy~mem_debug~fortran'
-                       '+hdf5+mpi+parallel+scoping+static'
-                       ' build_type=' + tpl_build_type
-            },
-        'boost': {
-            'version': '',
-            'variant': '+system+icu cxxstd=11'
-                       ''  # Boost is neither Cmake or AutoTools
-            },
-        'superlu-dist': {
-            'version': '@6.4.0',
-            'variant': '~ipo~int64'
-                       ' build_type=' + tpl_build_type
-            },
-        }
-
-    tty.debug('Determining Trilinos requirements for third party libraries (tpls)')
-    for tpl, tpl_config in tpl_variant_map.items():
-        vers = tpl_config["version"]
-        opts = tpl_config['variant']
-        tty.debug(f'{tpl} : version = {vers if vers else "any"}')
-        tty.debug(f'      : variant = {opts}')
-        depends_on(f'{tpl}{vers}{opts}',
-                   type=('build', 'link', 'run'))
-        if tpl not in ['cgns']:
-            depends_on(f'{tpl}+shared', when='+tpls_shared')
-            depends_on(f'{tpl}~shared', when='~tpls_shared')
-
-    # this depends on concretizer = clingo
-    # with that new concretizer, spack will realize that we have declared
-    # a lapack/blas provider (in libsci), and then enforce that dependencies
-    # use the declared provider (and spec).
-    depends_on('superlu-dist+openmp',
-               type=('build', 'link', 'run'),
-               when='exec_space=openmp')
-    depends_on('superlu-dist~openmp',
-               type=('build', 'link', 'run'),
-               when='exec_space=serial')
-    # without clingo, I tried this... which caused the conretizer to go into an
-    # infinite loop
-    # depends_on('superlu-dist@6.4.0~ipo~int64+shared+openmp^cray-libsci+openmp',
-    #                type=('build', 'link', 'run'),
-    #                when='exec_space=openmp host_lapack=libsci')
-    # depends_on('superlu-dist@6.4.0~ipo~int64+shared~openmp^cray-libsci~openmp',
-    #                type=('build', 'link', 'run'),
-    #                when='exec_space=serial host_lapack=libsci')
+        depends_on(dep['constraint'],
+                   type=('build', 'link', 'run'),
+                   when=dep['when'])
 
     patch('cray_secas.patch')
     patch('atdm-env-add-hip.patch')
@@ -416,7 +505,7 @@ class AtdmTrilinos(CMakePackage):
                         if extra.lower() != 'none']
 
         # try to be static if asked to be
-        if '~tpl_shared' in spec:
+        if '~tpls_shared' in spec:
             options += [define('CMAKE_FIND_LIBRARY_SUFFIXES', '.a;.so')]
 
         options.extend([
@@ -497,7 +586,7 @@ class AtdmTrilinos(CMakePackage):
             os.system(f'cp -vr {lcl_spack_env_dir} {dest_dir}')
             os.system(f'ls -l {dest_dir}')
 
-        loaded_modules=module("list")
+        loaded_modules = module("list")
         tty.msg("\n\n\n\n==========================================\n"
                 "calling cmake\n"
                 "  module list:\n "
@@ -1084,10 +1173,10 @@ class AtdmTrilinos(CMakePackage):
             s_version = d['version']
             if 'external' in d:
                 if 'module' in d['external']:
-                    for module in d['external']['module']:
+                    for module_name in d['external']['module']:
                         # the real name of MPI is in the module name..
-                        if n in module:
-                            s_name, _, s_version = module.partition('/')
+                        if n in module_name:
+                            s_name, _, s_version = module_name.partition('/')
                             s_name = s_name.replace('_', '-')
         return s_name, s_version
 

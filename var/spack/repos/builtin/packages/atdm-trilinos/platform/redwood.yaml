@@ -53,7 +53,7 @@ platform:
         cray-libsci:
           default: True
           note: Libsci cannot be linked static on Shasta systems
-          version:
+          version: ''
           variant: ~mpi
           shared: +shared
           # redwood requires shared
