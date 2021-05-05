@@ -443,13 +443,13 @@ class AtdmTrilinos(CMakePackage):
         if 'all' in build_for:
             options.extend([
                 define('Trilinos_ENABLE_ALL_PACKAGES', True),
-                ])
+            ])
 
         if '+tests' in spec:
             options.extend([
                 define('Trilinos_ENABLE_TESTS', True),
                 define('Trilinos_ENABLE_EXAMPLES', True),
-                ])
+            ])
 
         # add extra cmake parameters verbatim
         extra_cmake = spec.variants['extra_cmake'].value
@@ -476,10 +476,10 @@ class AtdmTrilinos(CMakePackage):
             define('Trilinos_ENABLE_CONFIGURE_TIMING', True),
             define('Trilinos_HOSTNAME', spec.variants['ci_hostname'].value),
             define('Trilinos_CONFIGURE_OPTIONS_FILE', opt_file),
-            define('Trilinos_ENABLE_BUILD_STATS', False),
+            define('Trilinos_ENABLE_BUILD_STATS', True),
             define('MPI_EXEC_MAX_NUMPROCS', trilinos_test_max_num_procs),
             define('DART_TESTING_TIMEOUT', 200),
-            ])
+        ])
 
         for disable_opt in disable_options:
             options += [define(disable_opt, False)]
