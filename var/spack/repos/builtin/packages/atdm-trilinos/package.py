@@ -9,7 +9,6 @@ import re
 from textwrap import dedent
 import shlex
 import subprocess
-from pprint import pprint
 from spack.util import spack_yaml as s_yaml
 from spack import *
 # provides module("command", args)
@@ -20,7 +19,8 @@ import llnl.util.tty as tty
 import collections
 
 
-def _atdmtrilinos_load_yaml(file_name, yaml_key=None):
+def _atdmtrilinos_load_policy(file_name, yaml_key=None):
+    tty.debug('Loading policy file: {0}'.format(file_name))
     try:
         with open(file_name) as fptr:
             yaml_data = s_yaml.load(fptr)
@@ -29,8 +29,9 @@ def _atdmtrilinos_load_yaml(file_name, yaml_key=None):
             else:
                 return yaml_data
 
-    except IOError:
-        tty.die("Error reading %s" % file_name)
+    except IOError as e:
+        tty.error("Error loading policy file: {0}".format(file_name))
+        tty.die("{0}".format(e))
 
 
 def _atdmtrilinos_recursive_update(d, u):
@@ -101,14 +102,11 @@ def _atdmtrilinos_load_config(platform_name):
     # this is pretty ugly...
     pkg_dir = os.path.abspath(os.path.dirname(__file__))
 
-    pkg_dir2 = os.path.join(spack.paths.packages_path, 'packages/atdm-trilinos')
-
-    print('{0}\n{1}\n'.format(pkg_dir, pkg_dir2))
-
     policy_file = '{0}/policy.yaml'.format(pkg_dir)
-    policy = _atdmtrilinos_load_yaml(policy_file, 'policy')
+    policy = _atdmtrilinos_load_policy(policy_file, 'policy')
     platform_file = '{0}/platform/{1}.yaml'.format(pkg_dir, platform_name)
-    platform_config = _atdmtrilinos_load_yaml(platform_file, 'platform')
+
+    platform_config = _atdmtrilinos_load_policy(platform_file, 'platform')
 
     config = _atdmtrilinos_recursive_update(policy, platform_config[platform_name])
     config['platform'] = platform_name
@@ -116,7 +114,6 @@ def _atdmtrilinos_load_config(platform_name):
 
     config['virtual_packages'] = set(['mpi', 'lapack', 'blas'])
     _atdmtrilinos_massage_virtual_packages(config)
-    pprint(config)
     return config
 
 
@@ -125,7 +122,6 @@ def _atdmtrilinos_default_in_dict(search_map):
     default = list(search_map.keys())[0]
     if len(search_map) == 1:
         return default
-    print(search_map)
     # if there is more than 1 look for a default property
     for k in search_map:
         if search_map[k].get('default', False):
@@ -140,14 +136,18 @@ def _atdmtrilinos_compose_exec_space_depends_helper(config,
                                                     constraint_list,
                                                     virtual_pkg=None):
 
+    # if doing depends for a virtual package then we need to constrain
+    # to that specific virtual package.
     vpkg_when = ''
-    if virtual_pkg and virtual_pkg == 'lapack':
-        vpkg_when = 'host_lapack={0}'.format(tpl)
+    if virtual_pkg:
+        if virtual_pkg == 'lapack':
+            vpkg_when = 'host_lapack={0}'.format(tpl)
+        if virtual_pkg == 'mpi':
+            vpkg_when = 'mpi_impl={0}'.format(tpl)
 
     # an internal property can be set if we shouldn't do anything
     # this happens if lapack == blas (tne you can skip one)
     # it also happens when a tpl is not provided through spack
-    print(f"tpl={tpl} tpl_d={tpl_d}")
     if (tpl_d.get('_disable_variant', False)
         or
         tpl_d.get('use_spack', False)):
@@ -164,27 +164,18 @@ def _atdmtrilinos_compose_exec_space_depends_helper(config,
     # not all packages support a build_type option if the package does not
     # identify it does, then assume it doesn't
     if not tpl_d.get('supports_build_type', False):
-        print("supports_build_type = ", tpl_d['supports_build_type'])
         vals['build_type'] = ''
 
     if 'exec_space' not in tpl_d:
-        txt = '''
-            depends_on('{tpl}{version} {build_type} {shared}{variant}',
-                       when='+tpls_shared {vpkg_when}')
-
-            depends_on('{tpl}{version} {build_type} {static}{variant}',
-                       when='~tpls_shared {vpkg_when}')
-            '''.format(**vals)
         o = [{'constraint': '{tpl}{version} {build_type} {shared}{variant}'
-                            ''.format(**vals),
+                            ''.format(**vals).strip(),
               'when':       '+tpls_shared {vpkg_when}'
-                            ''.format(**vals)},
+                            ''.format(**vals).strip()},
              {'constraint': '{tpl}{version} {build_type} {static}{variant}'
-                            ''.format(**vals),
+                            ''.format(**vals).strip(),
               'when':       '~tpls_shared {vpkg_when}'
-                            ''.format(**vals)}]
+                            ''.format(**vals).strip()}]
         constraint_list.extend(o)
-        print(txt)
         return
 
     pkg_execs = set(tpl_d['exec_space'].keys())
@@ -224,22 +215,14 @@ def _atdmtrilinos_compose_exec_space_depends_helper(config,
                     'exec_space': exec_space,
                     'vpkg_when':  vpkg_when}
 
-        txt = '''
-             depends_on('{tpl}{version} {build_type} {shared}{variant}',
-                        when='+tpls_shared exec_space={exec_space} {vpkg_when}')
-
-             depends_on('{tpl}{version} {build_type} {static}{variant}',
-                        when='~tpls_shared exec_space={exec_space} {vpkg_when}')
-             '''.format(**new_vals)
-        print(txt)
         o = [{'constraint': '{tpl}{version} {build_type} {shared}{variant}'
-                            ''.format(**new_vals),
+                            ''.format(**new_vals).strip(),
               'when':       '+tpls_shared exec_space={exec_space} {vpkg_when}'
-                            ''.format(**new_vals)},
+                            ''.format(**new_vals).strip()},
              {'constraint': '{tpl}{version} {build_type} {static}{variant}'
-                            ''.format(**new_vals),
+                            ''.format(**new_vals).strip(),
               'when':       '~tpls_shared exec_space={exec_space} {vpkg_when}'
-                            ''.format(**new_vals)}]
+                            ''.format(**new_vals).strip()}]
         constraint_list.extend(o)
 
 
@@ -332,24 +315,6 @@ class AtdmTrilinos(CMakePackage):
             default=True,
             description="Enable tests and examples")
 
-    variant('package_enables',
-            default='none',
-            values=('secondary', 'optional', 'none'),
-            multi=True,
-            description=('Define what level of package dependencies can be'
-                         + ' enabled. By defauly, "primary" tested code is enabled.'
-                         + ' when you enable a pacakge. (primary is implied and is'
-                         + ' not an option). Options may be combined.'
-                         + os.linesep
-                         + '  * secondary: enables "secondary" tested code'
-                         + os.linesep
-                         + '  * optional: enable optional packages.'
-                         + os.linesep
-                         + '  * none: only enable default primary tested code.'
-                         + os.linesep
-                         + ' See: https://docs.trilinos.org/files/'
-                         + 'TrilinosBuildReference.html Sec 5.3'))
-
     variant('extra_cmake',
             multi=False,
             description=('Provide additional CMake variables (or flags).'
@@ -366,7 +331,7 @@ class AtdmTrilinos(CMakePackage):
             multi=False,
             default=platform_name)
 
-    tty.msg("Unifying policy and platform...")
+    tty.debug("ATDM Trilinos: Unifying policy and platform...")
     atdm_config = _atdmtrilinos_load_config(platform_name)
 
     # control the execution space used
@@ -432,11 +397,8 @@ class AtdmTrilinos(CMakePackage):
                    when=depends['when'])
     # apply TPL dependencies
     for dep in _atdmtrilinos_compose_exec_space_depends(atdm_config):
-        print("""
-              +depends_on('{constraint}',
-                         when='{when}')
-              """.format(**dep))
-
+        tty.debug("Adding: depends_on('{constraint}',".format(**dep))
+        tty.debug("                   when='{when}')".format(**dep))
         depends_on(dep['constraint'],
                    type=('build', 'link', 'run'),
                    when=dep['when'])
@@ -444,7 +406,6 @@ class AtdmTrilinos(CMakePackage):
     patch('cray_secas.patch')
     patch('atdm-env-add-hip.patch')
     patch('fix-atdm-dev-env-parmetis.patch')
-    # patch('shylu.patch')
     # piro include test
     patch('https://github.com/jjellio/Trilinos/commit/a82a80df2ec982b3073a03b257fcc3688e4e0542.patch',
           sha256='d6d1d2f6e9f4a3e2a7a30bb4b718499633ddfc20992069e3fb0b03e70a45bee4')
@@ -487,17 +448,6 @@ class AtdmTrilinos(CMakePackage):
                 define('Trilinos_ENABLE_EXAMPLES', True),
                 ])
 
-        package_enables = spec.variants['package_enables']
-        if 'secondary' in package_enables:
-            options.extend([
-                define('Trilinos_ENABLE_SECONDARY_TESTED_CODE', True),
-                ])
-
-        if 'optional' in package_enables:
-            options.extend([
-                define('Trilinos_ENABLE_ALL_OPTIONAL_PACKAGES', True),
-                ])
-
         # add extra cmake parameters verbatim
         extra_cmake = spec.variants['extra_cmake'].value
         if extra_cmake:
@@ -538,12 +488,12 @@ class AtdmTrilinos(CMakePackage):
         """This allows the Ninja generator to be set based on the spec
         :return: standard cmake arguments
         """
-        # standard CMake arguments
-        if "+ninja" in self.spec:
-            CMakePackage.generator = "Ninja"
+        # TODO: make spack have a commandline option for choosing a generator
+        CMakePackage.generator = "Ninja"
 
         std_cmake_args = CMakePackage._std_args(self)
 
+        # why is this here?
         # std_cmake_args += getattr(self, 'cmake_flag_args', [])
         return std_cmake_args
 
@@ -1083,7 +1033,8 @@ class AtdmTrilinos(CMakePackage):
             export ATDM_CONFIG_SYSTEM_NAME="{spack_magic}"
             export ATDM_CONFIG_BUILD_TYPE="{atdm_config_build_type}"
             export ATDM_CONFIG_JOB_NAME="{atdm_config_build_name}"
-            export ATDM_CONFIG_PT_PACKAGES="ON"
+            # from a discussion with Ross, this should be deleted in DevSettings
+            export ATDM_CONFIG_PT_PACKAGES="OFF"
             export ATDM_CONFIG_CUSTOM_COMPILER_SET="1"
             export ATDM_CONFIG_COMPILER="{atdm_config_compiler}"
             export ATDM_CONFIG_CUSTOM_CONFIG_DIR="{spack_magic_dir}"
