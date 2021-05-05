@@ -72,21 +72,21 @@ policy:
       variant: ~cxx~burstbuffer+fortran
       shared: +shared
       static: ~shared
-      supports_build_type: False
+      supports_build_type: True
     hdf5:
       atdm_name: HDF5
       version: '@1.10.7'
       variant: ~cxx~debug~threadsafe~java+fortran+hl+mpi+szip
       shared: +shared
       static: ~shared
-      supports_build_type: False
+      supports_build_type: True
     netcdf-c:
       atdm_name: NETCDF
       version: ''
       variant: '~hdf4~jna+dap+mpi+parallel-netcdf'
       shared: +shared
       static: ~shared
-      supports_build_type: False
+      supports_build_type: True
     binutils:
       atdm_name: BINUTILS
       version: ''
@@ -94,6 +94,12 @@ policy:
       shared: ''
       static: ''
       supports_build_type: False
+    zlib:
+      atdm_name: ZLIB
+      version: ''
+      shared: +shared
+      static: ~shared
+      supports_builds_type: False
     lapack:
       atdm_name: LAPACK
       openblas:

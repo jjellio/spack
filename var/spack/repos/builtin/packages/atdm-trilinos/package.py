@@ -114,6 +114,8 @@ def _atdmtrilinos_load_config(platform_name):
 
     config['virtual_packages'] = set(['mpi', 'lapack', 'blas'])
     _atdmtrilinos_massage_virtual_packages(config)
+    from pprint import pprint
+    pprint(config, width=120)
     return config
 
 
@@ -150,7 +152,7 @@ def _atdmtrilinos_compose_exec_space_depends_helper(config,
     # it also happens when a tpl is not provided through spack
     if (tpl_d.get('_disable_variant', False)
         or
-        tpl_d.get('use_spack', False)):
+        not tpl_d.get('use_spack', True)):
         return
 
     vals = {'tpl':        tpl,
@@ -238,7 +240,8 @@ def _atdmtrilinos_compose_exec_space_depends(config):
     tpls = config['tpls']
     constraint_list = []
     for tpl, tpl_d in tpls.items():
-        if tpl_d.get('_disable_variant', False):
+        if (tpl_d.get('_disable_variant', False) or
+            tpl_d.get('use_spack', False)):
             continue
 
         if tpl in config['virtual_packages']:
